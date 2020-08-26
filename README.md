@@ -1,3 +1,3 @@
-# state-of-mara
+# mara
 
 From R Studio
