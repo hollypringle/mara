@@ -1,0 +1,240 @@
+---
+title: "Checking 2018 Tags"
+author: "Holly Pringle"
+date: "11/11/2020"
+output: html_document
+---
+### Part 3 : Final checks and filling in the gaps ###
+
+Following on from 'November Data Organisation'...
+
+Load required packages:
+```
+library(tidyr)
+library(tidyverse)
+library(dplyr)
+library(beepr)
+library(readbulk)
+```
+
+Load in the complete metadata and check number of images, tags etc.
+
+```
+FullMetadata<-read.csv("FullMetadata_2018_VNov.csv")
+N.img.full <- length(unique(FullMetadata$image)) # number of images tagged
+N.labels.full <- length(unique(FullMetadata$label)) # number of different tags
+list.labels <- sort(unique(FullMetadata$label)) # back engineering the list of tags to double check
+```
+
+In total, there are `r N.img.full` images from 2018 after including 5 minute intervals. 62411 were already tagged prior to this November round, so we should have 69716 in the new subset at the end of this. 
+
+The number of different tags is `r N.labels.full`
+
+Here are the labels:
+`r list.labels`
+
+You can see that there are some typos and incorrect tags, so we can fix them now:
+
+```
+FullMetadata$label <- sub(pattern="ververt_monkey", replace="vervet_monkey",FullMetadata$label) # correcting typo
+FullMetadata$label <- sub(pattern="domestic_dog ", replace="domestic_dog",FullMetadata$label) # correcting typo
+FullMetadata$label <- sub(pattern="hyaena_spotted", replace="hyena_spotted",FullMetadata$label) # correcting typo
+FullMetadata$label <- sub(pattern="juvenille", replace="juvenile",FullMetadata$label) # correcting typo
+FullMetadata$label <- sub(pattern="other_rodent", replace="other_rodents",FullMetadata$label) # correcting typo
+FullMetadata$label <- sub(pattern="other_rodentss", replace="other_rodents",FullMetadata$label) # correcting typo
+FullMetadata$label <- sub(pattern="southern_groundhornbill", replace="southern_ground_hornbill",FullMetadata$label) # correcting typo
+FullMetadata$label <- sub(pattern="spring_hare", replace="springhare",FullMetadata$label) # correcting typo
+FullMetadata$label <- sub(pattern="unidentified ", replace="unidentified",FullMetadata$label) # correcting typo
+FullMetadata$label <- sub(pattern="vechicle", replace="vehicle",FullMetadata$label) # correcting typo
+FullMetadata$label<-gsub("\\s*\\([^\\)]+\\)","blue",as.character(FullMetadata$label))
+FullMetadata$label <- sub(pattern="cblue", replace="elephant",FullMetadata$label)
+list.labels.corrected<-sort(unique(FullMetadata$label))
+```
+
+Now we have:
+`r list.labels.corrected`
+
+OMC3 has no VOTT rectangle coordinates at the moment. We can extract these from the JSONs and add them to the metadata. This is only because the tags were extracted directly from the JSONs. If the CSV is exported from VOTT, we shouldn't need to do this.
+
+```
+library(dplyr) #bind_rows
+library(here)
+library(lubridate)
+library(knitr)
+library(stringr)
+library(taxize)
+library(profvis)
+library(jsonlite)
+library(tidyr)
+library(stringr)
+library(pbapply)
+
+#OMC3listfiles <- list.files("D:/OMC3_output", recursive= TRUE, full.names = TRUE, pattern = "*asset.json") #directory where JSONs are stored
+
+###JSON extraction function - this can be reused for each folder###
+json_extract<-function(json_file){
+  jsin<-jsonlite::fromJSON(json_file) 
+  ImageID<-jsin$asset$name
+  ImageWidth<-jsin$asset$size$width
+  ImageHeight<-jsin$asset$size$height
+  # TagID<-gsub("-asset.json", "",basename(json_file))
+  
+  json_loop_out<-NULL
+  for (i in 1:nrow(jsin$regions)){  #length(jsin$regions)){
+    
+    CommonName<-as.character(jsin$regions$tags[[i]]) # (jsin$regions[[i]]$tags) sometimes works if this doesn't
+    box_id<-jsin$regions$id[i]
+    box_width <- jsin$regions$boundingBox$width[i]
+    box_height<-jsin$regions$boundingBox$height[i]
+    xmin<-min(jsin$regions$points[[i]]$x)
+    ymin<-min(jsin$regions$points[[i]]$y)
+    xmax<-max(jsin$regions$points[[i]]$x)
+    ymax<-max(jsin$regions$points[[i]]$y)
+    
+    
+    jlo_out<-data.frame(CommonName,box_id, box_width, box_height, xmin, ymin, xmax, ymax)
+    json_loop_out<-rbind(json_loop_out, jlo_out)
+  }
+  
+  #TagID<-paste(TagID, json_loop_out$box_id, sep = "_")
+  
+  json_out<-data.frame( ImageID = ImageID, ImageWidth = ImageWidth, ImageHeight = ImageHeight, json_loop_out, JSON_filepath = json_file)
+  return(json_out)
+}
+
+json_OMC3 <- pblapply(OMC3listfiles,json_extract) 
+df_OMC3<- do.call("rbind", json_OMC3)
+write.csv(df_OMC3, "OMC3_coords.csv")
+
+```
+Now we can add the coordinates to the metadata:
+
+```
+df_OMC3<-read.csv("OMC3_coords.csv")
+df_OMC3 <- rename(df_OMC3, image = ImageID)
+FullMetadata$xmin <- ifelse(is.na(FullMetadata$xmin), df_OMC3$xmin, FullMetadata$xmin)
+FullMetadata$xmax <- ifelse(is.na(FullMetadata$xmax), df_OMC3$xmax, FullMetadata$xmax)
+FullMetadata$ymin <- ifelse(is.na(FullMetadata$ymin), df_OMC3$ymin, FullMetadata$ymin)
+FullMetadata$ymax <- ifelse(is.na(FullMetadata$ymax), df_OMC3$ymax, FullMetadata$ymax)
+```
+```{r}
+head(FullMetadata)
+```
+
+Checking that OMC3 now has coordinates:
+```
+OMC3subset<-subset(FullMetadata, tagger =="liam"& stage=="nov"&ConservancyID=="OMC")
+```
+```{r}
+head(OMC3subset)
+```
+
+To calculate the number of images to check per species per tagger, we need to create a column which joins the label to the tagger:
+
+```
+FullMetadata <- unite(data=FullMetadata, # dataframe
+                  col="label_tagger", #name of the new col
+                  c("label", "tagger"), # cols to be joined
+                  sep="_", remove=FALSE)
+head(FullMetadata)
+label.tagger <- as.data.frame(sort(table(FullMetadata$label_tagger))) # freq of unique label+tagger
+tail(label.tagger)
+N.labtag <- length(unique(FullMetadata$label_tagger))
+label.tagger[label.tagger$Freq>100,]  ### just exploring data
+```
+
+Now we need to create a column with two distinct time periods (night and day) using proportional time:
+```{r}
+str(FullMetadata)
+FullMetadata$Period <- FullMetadata$time_prop 
+FullMetadata$Period[FullMetadata$Period <0.25 | FullMetadata$Period >=0.75] <- "night" 
+FullMetadata$Period[FullMetadata$Period >=0.25 & FullMetadata$Period <0.75] <- "day"
+unique(FullMetadata$Period)
+```
+
+There appear to be some NAs....
+```{r}
+which(is.na(FullMetadata$Period), arr.ind=TRUE) 
+# rows 153463:153465 are NA, need to understand why
+check.na <- FullMetadata[c(153463:153465),]
+```
+
+These are the files with NA. All 3 are images with humans without metadata, so they can be excluded from DF. NB: They all have the same image file name
+
+```{r} 
+FullMetadata <- FullMetadata[-c(153463:153465),] 
+unique(FullMetadata$Period)
+N.img.check <- length(unique(FullMetadata$image)) 
+```
+
+Now there are `r N.img.check` images from 2018 after including 5 minute intervals and removing these 3 rows. Only one in total has been removed since all 3 tags were in the same file.
+
+Create a column with unique ID with spp_tagger_period
+```{r}
+FullMetadata <- unite(data=FullMetadata, # dataframe
+                  col="label_tagger_period", #name of the new col
+                  c("label_tagger", "Period"), # cols to be joined
+                  sep="_", remove=FALSE) # keep original cols
+head(FullMetadata)
+```
+
+### Part 4 ###
+
+Now, generate a list of image to be checked. We only want to check the most recent subset as the first batch of data has already been checked by Emily.
+```{r}
+NewSubset<-subset(FullMetadata,stage=="nov")
+N.img.NewSub <- length(unique(NewSubset$image)) # number of images tagged
+```
+
+```
+write.csv(NewSubset, "2018Subset_NovemberStage.csv")
+```
+
+The new subset contains `r N.img.NewSub` images. Add this to the 62410 images(after removing the image with NAs for dates)  that were already checked and we have the total of `r N.img.check` . Yay, it all adds up!
+
+
+Duplicates have to be removed at this stage to avoid clash later on between image sample size and tag sample size (causes replacement to be needed).
+Extra rows for images with more than one individual of a species will be removed, as we may end up checking the same image more than once. However, there will still be one row for each image left.
+
+We will remove ALL files with more than one species in, as we will not be able to tell which species has the label. For example, if an image has a Grant's and Thomson's gazelle in, we will be unable to tell which animal a tag for 'Grant's' is referring to.
+
+```{r}
+removedduplicates<-NewSubset %>% distinct(image , label_tagger, .keep_all = TRUE) 
+removedmultispecies<-removedduplicates[!(duplicated(removedduplicates$image) | rev(duplicated(rev(removedduplicates$image)))), ]
+```
+
+Now calculate the sample sizes to be checked. 
+
+10% of images per tag per tagger are sub-setted with a max cap of 100, so for 5 taggers who all tagged 1000+ images of wildebeest a total of 500 wildebeest images are selected. Additionally, a lower cap of 10 is used for species where 10% of images of a species a tagger tagged was less than 10. If a tagger tagged less than 10 images of a species then all the images were selected. 
+
+```{r}
+totalstable<-table(removedmultispecies$label,removedmultispecies$tagger)
+totalsmatrix<-as.data.frame.matrix(totalstable)
+totals10<-apply(totalsmatrix, 2, function(x) ifelse(x < 10, x, x*0.1)) #convert to 10% if larger than 10 #perhaps simpler: totals10<-totalsmatrix*0.1 #convert to 10%
+totalsrounded<-ceiling(totals10) #round to whole number
+maxcap<-apply(totalsrounded, 2, function(x) ifelse(x > 100, 100, x)) #add upper cap of 100
+mincap<-apply(maxcap, 2, function(x) ifelse(x > 0 & x < 10, 10, x)) #add lower cap of 10
+samplesizes <- ifelse(totalstable < 10, totalstable, mincap) #if total is less than 10, check all images and match to original metadata count
+samplesizes <- cbind(rownames(samplesizes), data.frame(samplesizes, row.names=NULL))
+head(samplesizes)
+dfsample<-gather(samplesizes, key="tagger",value= "samplesize", emily:taras, na.rm = FALSE, convert = FALSE)
+dfsample <- unite(data=dfsample, # dataframe #adding label_tagger column
+                  col="label_tagger", #name of the new col
+                  c("rownames(samplesizes)", "tagger"), # cols to be joined
+                  sep="_", remove=FALSE) 
+head(dfsample)
+```
+
+The total number of images to check for accuracy is `r sum(dfsample$samplesize)`. 
+
+To generate file list, we need to incorporate these sample sizes with the metadata. This will randomly select the correct number of files per tagger+species.
+
+```{r}
+removedmultispecies$samplesize <- dfsample$samplesize[match(removedmultispecies$label_tagger, dfsample$label_tagger)] #add samplesize column to original metadata
+head(removedmultispecies)
+filestocheck <- removedmultispecies %>% group_by(label_tagger) %>% sample_n(samplesize, replace=FALSE) 
+write.csv(filestocheck, "filestocheck.csv")
+head(filestocheck)
+```
+
+We now have a full sample of the images we need to check for accuracy. Next we need to create multiple folder for the different species images to be checked.

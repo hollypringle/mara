@@ -1,0 +1,446 @@
+---
+title: "NovemberCheckingMarkdownPart2"
+author: "Holly Pringle"
+date: "12/11/2020"
+output: html_document
+---
+
+### Moving 'other' species ###
+
+Load in the November Subset metadata
+```
+NovSubset<-read.csv("2018Subset_NovemberStage.csv")
+N.img.NovSubset<- length(unique(NovSubset$image))
+```
+
+
+We need to copy over species such as 'other_mongoose' and 'other_bird' so we can identify them at a later stage.
+
+```
+head(NovSubset)
+birdpath <- NovSubset[(NovSubset$label=="other_bird"), "FilePath"]  # file paths for all other birds for retagging
+head(birdpath)
+
+```
+
+Next, eliminate duplicated files - i.e. photos with more than 1 tag
+
+```
+birdpath <- unique(birdpath)
+```
+
+We need to create a folder to check files. First a general folder to paste all files we will eventually check:
+
+```
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/", 
+                  "checking_tags"))
+```
+
+And now a folder for birds only:
+
+```
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",
+                  "other_birds"))
+
+file.copy(birdpath, 
+          to= "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/other_birds", 
+          overwrite= FALSE,  recursive = TRUE, copy.date=TRUE) 
+```
+
+Check number of images in folder is expected:
+```
+
+birdsubset<-subset(NovSubset, label =="other_bird")
+N.img.birdsubset<- length(unique(birdsubset$image))
+
+```
+
+There are `r N.img.birdsubset` in the metadata, and this matched with the number of files in the folder to check. Nice.
+
+Do the same for unidentified:
+
+```
+
+noidpath <- NovSubset[(NovSubset$label=="unidentified"), "FilePath"]  # file paths for all unidentified
+head(noidpath)
+
+# eliminating duplicated files - i.e. photos with more than 1 tag
+noidpath <- unique(noidpath)
+
+# creating folder to paste unidentified files
+
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",
+                  "unidentified"))
+
+file.copy(noidpath, 
+          to= "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/unidentified", 
+          overwrite= FALSE,  recursive = TRUE, copy.date=TRUE)
+```
+Check number of images in folder is expected:
+```
+
+noidsubset<-subset(NovSubset, label =="unidentified")
+N.img.noid<- length(unique(noidsubset$image))
+
+```
+
+There are `r N.img.noid` in the metadata, and this matched with the number of files in the folder to check.
+
+And for mongoose:
+
+```
+mongoosepath <- NovSubset[(NovSubset$label=="mongoose_other"), "FilePath"]  # file paths for all mongoose
+head(mongoosepath)
+mongoosepath <- unique(mongoosepath)
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",
+                  "mongoose_other"))
+file.copy(mongoosepath, 
+          to= "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/mongoose_other", 
+          overwrite= FALSE,  recursive = TRUE, copy.date=TRUE)
+```
+
+And query
+
+```
+querypath <- NovSubset[(NovSubset$label=="query"), "FilePath"]  # file paths for all mongoose
+head(querypath)
+querypath <- unique(querypath)
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",
+                  "query"))
+file.copy(querypath, 
+          to= "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/query", 
+          overwrite= FALSE,  recursive = TRUE, copy.date=TRUE)
+
+querysubset<-subset(NovSubset, label =="query")
+N.img.query<- length(unique(querysubset$image))
+
+
+```
+
+Next we need to create multiple folder for the different species images to be checked. Create subfolders in the directory according to label names:
+
+```
+foldername_list <- read.csv("tagging_check_foldernames_Nov.csv", header = TRUE)
+subfolder_names<- (foldername_list$folder_name) 
+for (j in 1:length(subfolder_names)){
+  folder<-dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",subfolder_names[j]))
+}
+
+```
+
+Load in the "filestocheck" csv from the Checking Part 1. This is a spreadsheet which contains the list of random files we need to check to calculate accuracy.
+
+```
+
+file_list <- read.csv("filestocheck.csv", header = TRUE)
+head(file_list)
+
+```
+
+Make sure the list of tags look right:
+
+```
+list.labels.check <- sort(unique(filestocheck$label))
+list.labels.check
+```
+
+
+Add a column of the target diectory to the list of images to be checked.
+
+```
+file_list$targetpath <- "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/"
+file_list$fulltargetpath <- paste0(file_list$targetpath,file_list$label)
+head(file_list)
+```
+Then move images into species folders 
+[i,21] is the current file pathway
+[i,28] is the target pathway
+[i,3] is the image name
+
+```
+for (i in 1:nrow(file_list)) {
+  file.copy(from = paste0(file_list[i,21]), 
+            to=paste0(file_list[i,28], "/", file_list[i,3]), overwrite = TRUE, recursive = FALSE, copy.date=TRUE) } 
+beep(sound = 1, expr = NULL)
+for (j in 1:length(subfolder_names)){
+  folder<-dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/outputs/",subfolder_names[j],"_output"))
+} #create output folders
+
+```
+
+Now assess the checked tags.
+
+NB: Make sure to add both 'misidentified' and 'missed' labels. I forgot to add 'misdentified' labels to half of them and had to manually add in excel after :( not ideal :(
+
+
+Find labels only captured in multispecies images- these will need to be pulled out separately.
+
+```
+check = as.data.frame(setdiff(NovSubset$label_tagger, file_list$label_tagger)) #
+colnames(check)[colnames(check) == "setdiff(NovSubset$label_tagger, file_list$label_tagger)"]<- "label_tagger"
+multispeciescheck <-subset(NovSubset, label_tagger %in% check$label_tagger)
+N.img.multi <- length(unique(multispeciescheck$image))
+list.labels.multi <- sort(unique(multispeciescheck$label)) # back engineering the list of tags to double check
+
+```
+
+At this point I realised 6 images were just tagged 'animal' (by me, oops)- a leftover from the trial machine learning tags . These need to be corrected.
+
+```
+animalremoved<-NovSubset[!(NovSubset$label=="animal"),]
+N.img.animalremoved<- length(unique(animalremoved$image))
+commonimage<-intersect(NovSubset$image,animalremoved$image)
+animalremoved.retag<-NovSubset[!NovSubset$image %in% commonimage,]
+animalremoved.retagpath <- animalremoved.retag[(animalremoved.retag$label=="animal"), "FilePath"]  # file paths for all unidentified
+head(animalremoved.retagpath)
+
+# eliminating duplicated files - i.e. photos with more than 1 tag
+animalremoved.retagpath <- unique(animalremoved.retagpath)
+
+# creating folder to paste unidentified files
+
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",
+                  "animalremovedretag"))
+
+file.copy(animalremoved.retagpath, 
+          to= "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/animalremovedretag", 
+          overwrite= FALSE,  recursive = TRUE, copy.date=TRUE)
+```
+
+Back to the multispecies images... I am removing 'juvenile'. It only appears with other species, but I am not going to check these now. I just want to check the species.
+
+```
+multijuvenileremoved<-multispeciescheck[!(multispeciescheck$label=="juvenile"),]
+N.img.multijuvenileremoved <- length(unique(multijuvenileremoved$image))
+list.labels.multi <- sort(unique(multispeciescheck$label)) # back engineering the list of tags to double check
+
+list.labels.multijuvenileremoved <- sort(unique(multijuvenileremoved$label)) # back engineering the list of tags to double check
+
+multipath <- multijuvenileremoved$FilePath #file paths for all multi species images
+head(multipath)
+multipath <- unique(multipath)
+
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",
+                  "multijuvenileremoved"))
+file.copy(multipath, 
+          to= "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/multijuvenileremoved", 
+          overwrite= FALSE,  recursive = TRUE, copy.date=TRUE)
+```
+
+
+
+
+```
+library(readbulk)
+checkedtags2 <- read_bulk(directory = "D:/MaraData/Part2/checking_tags/outputs", subdirectories = TRUE, extension = "*.csv",data = NULL, verbose =TRUE, fun = utils::read.csv)
+head(checkedtags2)
+summary(checkedtags2)  # check overall proportion of "n" tags 
+N.img.rcheckedtags2<- length(unique(checkedtags2$image)) #2284
+```
+
+The total number of checked images is 2274. This is because I did not check birds, and I added the labels that were only found in multispecies images. Unidentified were pulled out separately and retagged, so not included in this check either. 
+
+```
+checkedtags_corrected<-read.csv("checked_tags_corrected.csv")
+misidentified<-subset(checkedtags_corrected,new=="misidentified")
+misidentified<-unique(misidentified)
+misidentified[!duplicated(misidentified,[c('image')]),]
+```
+
+Aardwolf, hartebeest and grants gazelle had low accuracy (more than 10% incorrect). Extract and check...
+
+```
+aardwolfpath <- NovSubset[(NovSubset$label=="aardwolf"), "FilePath"]  # file paths for all unidentified
+head(aardwolfpath)
+
+# eliminating duplicated files - i.e. photos with more than 1 tag
+aardwolfpath <- unique(aardwolfpath)
+
+# creating folder to paste unidentified files
+
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",
+                  "aardwolf_retag"))
+
+file.copy(aardwolfpath, 
+          to= "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/aardwolf_retag", 
+          overwrite= FALSE,  recursive = TRUE, copy.date=TRUE)
+
+```
+```
+
+gazelle_grantspath <- NovSubset[(NovSubset$label=="gazelle_grants"), "FilePath"]  # file paths for all unidentified
+head(gazelle_grantspath)
+
+# eliminating duplicated files - i.e. photos with more than 1 tag
+gazelle_grantspath <- unique(gazelle_grantspath)
+
+# creating folder to paste unidentified files
+
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",
+                  "gazelle_grants_retag"))
+
+file.copy(gazelle_grantspath, 
+          to= "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/gazelle_grants_retag", 
+          overwrite= FALSE,  recursive = TRUE, copy.date=TRUE)
+
+
+```
+
+```
+hartebeest_cokespath <- NovSubset[(NovSubset$label=="hartebeest_cokes"), "FilePath"] 
+head(hartebeest_cokespath)
+
+# eliminating duplicated files - i.e. photos with more than 1 tag
+hartebeest_cokespath <- unique(hartebeest_cokespath)
+
+# creating folder to paste unidentified files
+
+dir.create(paste0("//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/",
+                  "hartebeest_cokes_retag"))
+
+file.copy(hartebeest_cokespath, 
+          to= "//live.rd.ucl.ac.uk/ritd-ag-project-rd00lk-kejon62/biome_health_project_files/country_files/kenya/tagging_photos/5_minute_2018/NEW/checking_tags/hartebeest_cokes_retag", 
+          overwrite= FALSE,  recursive = TRUE, copy.date=TRUE)
+```
+We have to do the next bit in 3 steps, since sometimes a retag could be in the same image as an unidentified or query, so they would be duplicated otherwise...
+
+1) Now put all unidentified into one csv:
+
+```
+library(readbulk)
+unidentified <- read_bulk(directory = "D:/MaraData/Part2/unidentified", subdirectories = TRUE, extension = "*.csv",data = NULL, verbose =TRUE, fun = utils::read.csv)
+head(unidentified)
+summary(unidentified)  
+```
+
+2) Now all query
+
+```
+query<- read_bulk(directory = "D:/MaraData/Part2/query", subdirectories = TRUE, extension = "*.csv",data = NULL, verbose =TRUE, fun = utils::read.csv)
+head(query)
+summary(query)  # check overall proportion of "n" tags 
+```
+
+3) Now all retags. 
+```
+retag <- read_bulk(directory = "D:/MaraData/Part2/retag", subdirectories = TRUE, extension = "*.csv",data = NULL, verbose =TRUE, fun = utils::read.csv)
+head(retag)
+summary(retag)  # check overall proportion of "n" tags 
+```
+Replace old tags with new unidentified
+
+```
+old<-NovSubset
+newnoid<-unidentified
+
+library(dplyr)
+removednoid <- anti_join(old, newnoid, by = "image") #removing the old unidentified tags
+N.img.removednoid<- length(unique(removednoid$image)) #no of images when unidentigied are removed #67700
+N.img.newnoid<- length(unique(newnoid$image)) #2016
+newnoid$stage <- c("novretag") #change stage name
+meta <- read.csv("Kenya_CT2018_metadata.csv")
+correctednewnoid <- merge(newnoid,meta, by.x="image", by.y="ImageID", all.x=T)
+correctednewnoid$X<-NULL
+correctednewnoid$Subdirectory<-NULL
+correctednewnoid$File<-NULL
+head(correctednewnoid)
+correctednoid <- bind_rows(removednoid,correctednewnoid) #combine the old and new unidentified
+N.img.correctednoid<- length(unique(correctednoid$image))
+```
+#Now there are `r N.img.correctednoid` , which matches the original subset. Now to add the corrected queries #to this new dataframe.
+
+```
+newquery<-query
+removedquery <- anti_join(correctednoid, newquery, by = "image") #removing the old unidentified tags
+N.img.removedquery<- length(unique(removedquery$image)) #no of images when unidentigied are removed #69659
+N.img.newquery<- length(unique(newquery$image)) #57
+newquery$stage <- c("novretag") #change stage name
+correctednewquery<- merge(newquery,meta, by.x="image", by.y="ImageID", all.x=T)
+correctednewquery$X<-NULL
+correctednewquery$Subdirectory<-NULL
+correctednewquery$File<-NULL
+head(correctednewquery)
+correctedquery <- bind_rows(removedquery,correctednewquery) #combine the old and new unidentified
+N.img.correctedquery<- length(unique(correctedquery$image))
+```
+#Now there are `r N.img.correctedquery` , which matches the original subset. Now to add the retags to this new #dataframe.
+
+```
+newretag<-retag
+removedretag <- anti_join(correctedquery, newretag, by = "image") #removing the old unidentified tags
+N.img.removedretag<- length(unique(removedretag$image)) #no of images when unidentigied are removed #69536
+N.img.newretag<- length(unique(newretag$image)) #180
+newretag$stage <- c("novretag") #change stage name
+correctednewretag<- merge(newretag,meta, by.x="image", by.y="ImageID", all.x=T)
+correctednewretag$X<-NULL
+correctednewretag$Subdirectory<-NULL
+correctednewretag$File<-NULL
+head(correctednewretag)
+correctedretag <- bind_rows(removedretag,correctednewretag) #combine the old and new unidentified
+N.img.correctedretag<- length(unique(correctedretag$image)) #69716
+```
+#Now there are `r N.img.correctedretag` , which matches the original subset
+
+#Labelling ones I've retagged and binding to original metadata:
+
+``` 
+correctedNovV3<-correctedretag
+write.csv(correctedNovV3, "DecMetadataNovV3.csv")
+```
+
+#Make sure the list of tags look right:
+
+```
+list.labels.check.correctedNovV3 <- sort(unique(correctedNovV3$label))
+list.labels.check.correctedNovV3
+
+list.labels.check.Nov <- sort(unique(NovSubset$label))
+list.labels.check.Nov
+```
+
+#Add to previously tagged metadata:
+
+```
+removedfullmeta3 <- anti_join(FullMetadata, correctedNovV3, by = "image")
+N.img.removedfullmeta3<- length(unique(removedfullmeta3$image)) #62410
+correctedfullmetaV3 <- bind_rows(removedfullmeta3,correctedNovV3) #combine the old and new
+correctedfullmetaV3$X.1<-NULL
+head(correctedfullmetaV3)
+```
+
+Correct missing data from retag subset
+
+```
+retagsubset.correctedfullmetaV3<-subset(correctedfullmetaV3, stage =="novretag")
+retagsubset.correctedfullmetaV3$tagger<-c("holly")
+head(retagsubset.correctedfullmetaV3)
+N.img.retagsubset.correctedfullmetaV3<- length(unique(retagsubset.correctedfullmetaV3$image)) #2220
+retagsubset.correctedfullmetaV3$Period <- retagsubset.correctedfullmetaV3$time_prop 
+retagsubset.correctedfullmetaV3$Period[retagsubset.correctedfullmetaV3$Period <0.25 | retagsubset.correctedfullmetaV3$Period >=0.75] <- "night" retagsubset.correctedfullmetaV3$Period[retagsubset.correctedfullmetaV3$Period >=0.25 & retagsubset.correctedfullmetaV3$Period <0.75] <- "day"
+unique(retagsubset.correctedfullmetaV3$Period)
+
+retagsubset.correctedfullmetaV3 <- unite(data=retagsubset.correctedfullmetaV3, # dataframe
+                  col="label_tagger", #name of the new col
+                  c("label", "tagger"), # cols to be joined
+                  sep="_", remove=FALSE)
+                  
+retagsubset.correctedfullmetaV3 <- unite(data=retagsubset.correctedfullmetaV3, # dataframe
+                  col="label_tagger_period", #name of the new col
+                  c("label_tagger", "Period"), # cols to be joined
+                  sep="_", remove=FALSE) 
+head(retagsubset.correctedfullmetaV3)
+
+```
+
+```
+removedfullmetav5 <- anti_join(correctedfullmetaV3, retagsubset.correctedfullmetaV3, by = "image")
+N.img.removedfullmetav5<- length(unique(removedfullmetav5$image)) #129906
+correctedfullmetaV5 <- bind_rows(removedfullmetav5,retagsubset.correctedfullmetaV3) #combine the old and new
+N.img.correctedfullmetaV5<-length(unique(correctedfullmetaV5$image)) #132126
+head(correctedfullmetaV5) ##############################################
+write.csv(correctedfullmetaV5, "DecFullMetadataCorrectedV5.csv")
+
+```
+### Final file is renamed as FullMetadata_DECEMBER_FINAL on server.###
+
+
