@@ -1,0 +1,163 @@
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(ggExtra)
+tags<-read.csv("Kenya2018_tagswithmeta_occupancy_5min_FINAL_coords.csv")
+ndvi2018<-read.csv("NDVI_500m_2018.csv")
+str(tags)
+tags_coords <- tags %>% dplyr::select(CT_site, longitude, latitude)
+tagstable <- table(tags$Species)
+#Put survey effort in correct format
+allcams<-read.csv("all_sites_effort_occupancy_csv.csv")
+all_cams_totals<-allcams %>%summarize_if(is.numeric, sum, na.rm=TRUE)
+all_cams_totals<-as.data.frame(t(all_cams_totals))
+setDT(all_cams_totals, keep.rownames = TRUE[])
+colnames(all_cams_totals) <- c("CT_site","N_Days")
+all_cams_totals$conservancy<-substr(all_cams_totals$CT_site, start = 1, stop = 2)
+
+
+#Put tags in correct format
+removedduplicates.tags<-tags %>% distinct(image,Species,.keep_all = TRUE) #137375 tags
+N.img.removedduplicates.tags<-length(unique(removedduplicates.tags$image)) #131364
+N.img.tags<-length(unique(tags$image)) #131364
+tagsSE<-merge(removedduplicates.tags, all_cams_totals, by="CT_site", all=T)
+head(tagsSE)
+tagstable<-table(removedduplicates.tags$Species,removedduplicates.tags$CT_site)
+tagstotalstablematrix<-as.data.frame.matrix(tagstable)
+tagsmatrix<-as.data.frame(t(tagstotalstablematrix))
+head(tagsmatrix)
+###By Conservancy
+tagsDT_bycon<-setDT(tagsmatrix, keep.rownames = TRUE[])
+tagsDT_bycon<-as.data.frame(tagsDT_bycon)
+head(tagsDT_bycon)
+tagsDT_bycon <- rename(tagsDT_bycon, CT_site = rn)
+tagsDT_bycon<-merge(tagsDT_bycon,all_cams_totals, by="CT_site", all=T)
+tagsDT_bycon<-tagsDT_bycon %>% 
+  mutate_at(vars(aardvark:N_Days), as.numeric)
+tagsDT_bycon$CT_site<-NULL
+tagsDT_bycon<-aggregate(.~conservancy, tagsDT_bycon, FUN=sum,na.rm=T)
+tagsDT_bycon<-tagsDT_bycon  %>%
+  mutate_at(.funs = list(freq = ~.* 100/N_Days), .vars = vars(aardvark:zorilla))
+tagsDT_bycon_select<-tagsDT_bycon%>% select(conservancy, aardvark_freq:zorilla_freq)
+col_names <- colnames(tagsDT_bycon_select)
+col_names
+tagsDT_bycon<-setDT(tagsDT_bycon, keep.rownames = TRUE[])
+head(tagsDT_bycon)
+
+#large herbivores: eland, buffalo, hippo, elephant, cattle, zebra
+tagsDT_bycon_largeherb<-tagsDT_bycon_select%>% select(conservancy,9, 24, 36, 25, 41, 80)
+tagsDT_bycon_largeherb<-setDT(tagsDT_bycon_largeherb)
+tagsDT_bycon_largeherb = melt(tagsDT_bycon_largeherb, id.vars="conservancy")
+tagsDT_bycon_largeherb$conservancy = factor(tagsDT_bycon_largeherb$conservancy, 
+                       levels=c("MT", "MN", "OM", "NB"))
+p_largeherb = ggplot(data=tagsDT_bycon_largeherb, aes(x=conservancy, y=value, fill=conservancy)) +
+  ggtitle("Trap rate by conservancy") +
+  xlab("Conservancy") + ylab("Trap rate")+
+  geom_bar(stat="identity") +
+  scale_fill_viridis_d() +
+  facet_grid(. ~ variable)
+p_largeherb
+
+
+#medium herbivores: grants gazelle, bushbuck, hartebeest, topi, impala, waterbuck, wildebeest
+tagsDT_bycon_medherb<-tagsDT_bycon_select%>% select(conservancy, 32, 11, 39, 46, 73, 78, 79)
+tagsDT_bycon_medherb<-setDT(tagsDT_bycon_medherb)
+tagsDT_bycon_medherb = melt(tagsDT_bycon_medherb, id.vars="conservancy")
+tagsDT_bycon_medherb$conservancy = factor(tagsDT_bycon_medherb$conservancy, 
+                                            levels=c("MT", "MN", "OM", "NB"))
+p_medherb = ggplot(data=tagsDT_bycon_medherb, aes(x=conservancy, y=value, fill=conservancy)) +
+  ggtitle("Trap rate by conservancy") +
+  xlab("Conservancy") + ylab("Trap rate")+
+  geom_bar(stat="identity") +
+  scale_fill_viridis_d() +
+  facet_grid(. ~ variable)
+p_medherb
+
+# small herbivores: dikdik, hare, warthog, thomsons, oribi, reedbuck
+tagsDT_bycon_smallherb<-tagsDT_bycon_select%>% select(conservancy, 21,33,57, 63,77,38)
+tagsDT_bycon_smallherb<-setDT(tagsDT_bycon_smallherb)
+tagsDT_bycon_smallherb = melt(tagsDT_bycon_smallherb, id.vars="conservancy")
+tagsDT_bycon_smallherb$conservancy = factor(tagsDT_bycon_smallherb$conservancy, 
+                                          levels=c("MT", "MN", "OM", "NB"))
+p_smallherb = ggplot(data=tagsDT_bycon_smallherb, aes(x=conservancy, y=value, fill=conservancy)) +
+  ggtitle("Trap rate by conservancy") +
+  xlab("Conservancy") + ylab("Trap rate")+
+  geom_bar(stat="identity") +
+  scale_fill_viridis_d() +
+  facet_grid(. ~ variable)
+p_smallherb
+
+#carnivores: jackal, hyena, leopard, lion, bat eared, aardwolf, cheetah, caracal
+tagsDT_bycon_carn<-tagsDT_bycon_select%>% select(conservancy, 3,7,16, 18, 44, 45, 48,50:52)
+tagsDT_bycon_carn<-setDT(tagsDT_bycon_carn)
+tagsDT_bycon_carn = melt(tagsDT_bycon_carn, id.vars="conservancy")
+tagsDT_bycon_carn$conservancy = factor(tagsDT_bycon_carn$conservancy, 
+                                            levels=c("MT", "MN", "OM", "NB"))
+p_carn = ggplot(data=tagsDT_bycon_carn, aes(x=conservancy, y=value, fill=conservancy)) +
+  ggtitle("Trap rate by conservancy") +
+  xlab("Conservancy") + ylab("Trap rate")+
+  geom_bar(stat="identity") +
+  scale_fill_viridis_d() +
+  facet_grid(. ~ variable)
+p_carn
+
+#omnivores: vervet, baboon, mongoose
+tagsDT_bycon_omni<-tagsDT_bycon_select%>% select(conservancy, 10,5,76,53:55)
+tagsDT_bycon_omni<-setDT(tagsDT_bycon_omni)
+tagsDT_bycon_omni = melt(tagsDT_bycon_omni, id.vars="conservancy")
+tagsDT_bycon_omni$conservancy = factor(tagsDT_bycon_omni$conservancy, 
+                                       levels=c("MT", "MN", "OM", "NB"))
+p_omni = ggplot(data=tagsDT_bycon_omni, aes(x=conservancy, y=value, fill=conservancy)) +
+  ggtitle("Trap rate by conservancy") +
+  xlab("Conservancy") + ylab("Trap rate")+
+  geom_bar(stat="identity") +
+  scale_fill_viridis_d() +
+  facet_grid(. ~ variable)
+p_omni
+
+#livestock: cattle, shoats
+tagsDT_bycon_live<-tagsDT_bycon_select%>% select(conservancy, 17,68)
+tagsDT_bycon_live<-setDT(tagsDT_bycon_live)
+tagsDT_bycon_live = melt(tagsDT_bycon_live, id.vars="conservancy")
+tagsDT_bycon_live$conservancy = factor(tagsDT_bycon_live$conservancy, 
+                                       levels=c("MT", "MN", "OM", "NB"))
+p_live = ggplot(data=tagsDT_bycon_live, aes(x=conservancy, y=value, fill=conservancy)) +
+  ggtitle("Trap rate by conservancy") +
+  xlab("Conservancy") + ylab("Trap rate")+
+  geom_bar(stat="identity") +
+  scale_fill_viridis_d() +
+  facet_grid(. ~ variable)
+p_live
+
+###By camera trap
+tagsDT_byCT<-setDT(tagsmatrix, keep.rownames = TRUE[])
+head(tagsDT_byCT)
+tagsDT_byCT <- rename(tagsDT_byCT, CT_site = rn)
+tagsDT_byCT<-merge(tagsDT_byCT,all_cams_totals, by="CT_site", all=T)
+tagsDT_byCT<-tagsDT_byCT  %>%
+  mutate_at(.funs = list(freq = ~.* 100/N_Days), .vars = vars(aardvark:zorilla)) ####WORKS
+head(tagsDT_byCT)
+ndvi2018$X<-NULL
+ndvi2018 <- rename(ndvi2018, CT_site = Site)
+tagsDT_byCT<-merge(tagsDT_byCT,ndvi2018, by="CT_site", all=T)
+
+#####MAPS
+tags_coords<-tags_coords %>% distinct(CT_site,.keep_all = TRUE)
+tagsDT_byCT_coords<-merge(tagsDT_byCT, tags_coords, by="CT_site", all=T)
+head(tagsDT_byCT_coords)
+
+leopard_map <- tagsDT_byCT_coords %>% dplyr::select(CT_site, conservancy, leopard_freq,longitude,latitude)
+plot(leopard_map)
+leopard_map[leopard_freq==0] <- NA
+leopard_map.omit<- na.omit(leopard_map)
+pal <- colorFactor(
+  palette = 'Dark2',
+  domain = leopard_map.omit$conservancy
+)
+leopard_dist<-leaflet(leopard_map.omit) %>% addTiles() %>%
+  addCircles(lng = ~longitude, lat = ~latitude, weight = 1,
+             radius = ~sqrt(leopard_freq) * 100, popup = ~conservancy,
+             fillColor = ~pal(conservancy)
+  )
+leopard_dist
