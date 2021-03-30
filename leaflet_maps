@@ -1,0 +1,199 @@
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(ggExtra)
+tags<-read.csv("Kenya2018_tagswithmeta_occupancy_5min_FINAL_coords.csv")
+tags$Species <- sub(pattern="lion_female", replace="lion",tags$Species)
+tags$Species <- sub(pattern="lion_male", replace="lion",tags$Species)
+tags$Species <- sub(pattern="shoats", replace="shoat",tags$Species)
+sort(unique(tags$Species))
+ndvi2018<-read.csv("NDVI_500m_2018.csv")
+str(tags)
+tags_coords <- tags %>% dplyr::select(CT_site, longitude, latitude)
+tagstable <- table(tags$Species)
+tagstable
+#Put survey effort in correct format
+allcams<-read.csv("all_sites_effort_occupancy_csv.csv")
+all_cams_totals<-allcams %>%summarize_if(is.numeric, sum, na.rm=TRUE)
+all_cams_totals<-as.data.frame(t(all_cams_totals))
+setDT(all_cams_totals, keep.rownames = TRUE[])
+colnames(all_cams_totals) <- c("CT_site","N_Days")
+all_cams_totals$conservancy<-substr(all_cams_totals$CT_site, start = 1, stop = 2)
+
+#Put tags in correct format
+removedduplicates.tags<-tags %>% distinct(image,Species,.keep_all = TRUE) #137375 tags
+N.img.removedduplicates.tags<-length(unique(removedduplicates.tags$image)) #131364
+N.img.tags<-length(unique(tags$image)) #131364
+tagsSE<-merge(removedduplicates.tags, all_cams_totals, by="CT_site", all=T)
+head(tagsSE)
+tagstable<-table(removedduplicates.tags$Species,removedduplicates.tags$CT_site)
+tagstotalstablematrix<-as.data.frame.matrix(tagstable)
+tagsmatrix<-as.data.frame(t(tagstotalstablematrix))
+head(tagsmatrix)
+
+###By Conservancy
+tagsDT_bycon<-setDT(tagsmatrix, keep.rownames = TRUE[])
+tagsDT_bycon<-as.data.frame(tagsDT_bycon)
+head(tagsDT_bycon)
+tagsDT_bycon <- rename(tagsDT_bycon, CT_site = rn)
+tagsDT_bycon<-merge(tagsDT_bycon,all_cams_totals, by="CT_site", all=T)
+tagsDT_bycon<-tagsDT_bycon %>% 
+  mutate_at(vars(aardvark:N_Days), as.numeric)
+tagsDT_bycon$CT_site<-NULL
+tagsDT_bycon<-aggregate(.~conservancy, tagsDT_bycon, FUN=sum,na.rm=T)
+tagsDT_bycon<-tagsDT_bycon  %>%
+  mutate_at(.funs = list(freq = ~.* 100/N_Days), .vars = vars(aardvark:zorilla))
+tagsDT_bycon_select<-tagsDT_bycon%>% dplyr::select(conservancy, aardvark_freq:zorilla_freq)
+col_names <- colnames(tagsDT_bycon_select)
+col_names
+tagsDT_bycon<-setDT(tagsDT_bycon, keep.rownames = TRUE[])
+head(tagsDT_bycon)
+
+###By camera trap
+tagsDT_byCT<-setDT(tagsmatrix, keep.rownames = TRUE[])
+head(tagsDT_byCT)
+tagsDT_byCT <- rename(tagsDT_byCT, CT_site = rn)
+tagsDT_byCT<-merge(tagsDT_byCT,all_cams_totals, by="CT_site", all=T)
+tagsDT_byCT<-tagsDT_byCT  %>%
+  mutate_at(.funs = list(freq = ~.* 100/N_Days), .vars = vars(aardvark:zorilla)) ####WORKS
+head(tagsDT_byCT)
+ndvi2018$X<-NULL
+ndvi2018 <- rename(ndvi2018, CT_site = Site)
+tagsDT_byCT<-merge(tagsDT_byCT,ndvi2018, by="CT_site", all=T)
+
+tags_coords<-tags_coords %>% distinct(CT_site,.keep_all = TRUE)
+tagsDT_byCT_coords<-merge(tagsDT_byCT, tags_coords, by="CT_site", all=T)
+head(tagsDT_byCT_coords)
+
+##Map
+zorilla_map <- tagsDT_byCT_coords %>% dplyr::select(CT_site, conservancy, zorilla_freq, longitude,latitude)
+zorilla_map [zorilla_freq==0] <- NA
+zorilla_map.omit<- na.omit(zorilla_map)
+
+species_dist<-leaflet() %>%
+              addTiles() %>%
+              addCircles(data=grid_map.omit, group="Camera Grid",
+              lng = ~longitude, lat = ~latitude, weight = 1,popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=hartebeest_cokes_map.omit, group="Cokes' Hartebeest",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(hartebeest_cokes_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=cattle_map.omit, group="Cattle",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(cattle_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=shoat_map.omit, group="Shoats",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(shoat_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=topi_map.omit, group="Topi",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(topi_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=wildebeest_map.omit, group="Wildebeest",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(wildebeest_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=eland_map.omit, group="Eland",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(eland_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=impala_map.omit, group="Impala",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(impala_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=gazelle_grants_map.omit, group="Grant's Gazelle",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(gazelle_grants_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=buffalo_map.omit, group="Buffalo",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(buffalo_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=giraffe_map.omit, group="Giraffe",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(giraffe_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=serval_map.omit, group="Serval",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(serval_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=aardvark_map.omit, group="Aardvark",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(aardvark_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=aardwolf_map.omit, group="Aardwolf",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(aardwolf_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=baboon_map.omit, group="Baboon",
+              lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(baboon_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addCircles(data=bateared_fox_map.omit, group="Bat-eared fox",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(bateared_fox_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=bushbaby_map.omit, group="Bushbaby",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(bushbaby_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=bushbuck_map.omit, group="Bushbuck",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(bushbuck_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=caracal_map.omit, group="Caracal",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(caracal_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=cheetah_map.omit, group="Cheetah",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(cheetah_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=dikdik_map.omit, group="Dikdik",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(dikdik_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=domestic_dog_map.omit, group="Domestic Dog",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(domestic_dog_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=donkey_map.omit, group="Donkey",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(donkey_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=elephant_map.omit, group="Elephant",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(elephant_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=feral_cat_map.omit, group="Feral Cat",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(feral_cat_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=gazelle_thomsons_map.omit, group="Thomson's Gazelle",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(gazelle_thomsons_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=genet_map.omit, group="Genet",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(genet_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=gerbil_map.omit, group="Gerbil",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(gerbil_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=hare_map.omit, group="Hare",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(hare_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=hippopotamus_map.omit, group="Hippopotamus",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(hippopotamus_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=honey_badger_map.omit, group="Honey Badger",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(honey_badger_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=human_map.omit, group="Human",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(human_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=hyena_spotted_map.omit, group="Spotted Hyena",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(hyena_spotted_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=hyena_striped_map.omit, group="Striped Hyena",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(hyena_striped_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=jackal_map.omit, group="Jackal",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(jackal_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=leopard_map.omit, group="Leopard",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(leopard_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=lion_map.omit, group="Lion",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(lion_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=mongoose_banded_map.omit, group="Banded Mongoose",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(mongoose_banded_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=mongoose_white_tailed_map.omit, group="White-tailed Mongoose",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(mongoose_white_tailed_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=oribi_map.omit, group="Oribi",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(oribi_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=ostrich_map.omit, group="Ostrich",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(ostrich_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=porcupine_map.omit, group="Porcupine",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(porcupine_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=reedbuck_map.omit, group="Reedbuck",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(reedbuck_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=springhare_map.omit, group="Springhare",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(springhare_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=vervet_monkey_map.omit, group="Vervet Monkey",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(vervet_monkey_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=warthog_map.omit, group="Warthog",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(warthog_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=waterbuck_map.omit, group="Waterbuck",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(waterbuck_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=zebra_map.omit, group="Zebra",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(zebra_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+    addCircles(data=zorilla_map.omit, group="Zorilla",
+               lng = ~longitude, lat = ~latitude, weight = 1,radius = ~sqrt(zorilla_freq) * 100, popup = ~CT_site,fillColor = ~pal(conservancy))%>%
+              addLayersControl(
+                overlayGroups = c("Camera Grid", "Aardvark","Aardwolf","Baboon","Banded Mongoose","Bat-eared fox","Buffalo","Bushbaby","Bushbuck", "Caracal","Cattle", "Cheetah", "Cokes' Hartebeest", "Dikdik","Domestic Dog","Donkey", "Eland","Elephant", "Feral Cat", "Genet", "Gerbil", "Giraffe", "Grant's Gazelle","Hare","Hippopotamus","Honey Badger","Human", "Impala","Jackal", "Leopard","Lion", "Oribi","Ostrich","Porcupine", "Reedbuck", "Serval","Shoats","Spotted Hyena","Springhare", "Striped Hyena", "Thomson's Gazelle", "Topi","Vervet Monkey","Warthog", "Waterbuck", "White-tailed Mongoose", "Wildebeest", "Zebra", "Zorilla"),
+                options = layersControlOptions(collapsed = TRUE)              )%>%
+    hideGroup(c("Aardvark","Aardwolf","Baboon","Banded Mongoose","Bat-eared fox","Buffalo","Bushbaby","Bushbuck", "Caracal","Cattle", "Cheetah", "Cokes' Hartebeest", "Dikdik","Domestic Dog","Donkey", "Eland","Elephant", "Feral Cat", "Genet", "Gerbil", "Giraffe", "Grant's Gazelle","Hare","Hippopotamus","Honey Badger","Human", "Impala","Jackal", "Leopard","Lion", "Oribi","Ostrich","Porcupine", "Reedbuck", "Serval","Shoats","Spotted Hyena","Springhare", "Striped Hyena", "Thomson's Gazelle", "Topi","Vervet Monkey","Warthog", "Waterbuck", "White-tailed Mongoose", "Wildebeest", "Zebra", "Zorilla"))
+
+saveWidget(species_dist, "allmammals_widget.html")
+saveWidget(widget=cattle_dist,
+           file="cattle_dist.html",
+           selfcontained=TRUE)
+           
+###Timelapse
+
+library(leaftime)
+head(tags)
+elephantrec<-subset(tags, Species=="elephant")
+elephantrec <- elephantrec %>% dplyr::select(CT_site, longitude, latitude,Species,ConservancyID, DateTime)
+start <- as.Date("2018-10-20")
+end <- as.Date("2018-11-20")
+elephantrec<- elephantrec[elephantrec$DateTime >= start & elephantrec$DateTime  <= end,]
+elephantrec <- rename(elephantrec, start = DateTime)
+head(elephantrec)
+elephantrec$end <- as.Date(elephantrec$start)+1
+elephantrec_geo <- geojson_json(elephantrec,lat="latitude",lon="longitude")
+leaflet() %>%
+  addTiles() %>%
+  addTimeline(data = elephantrec_geo, group="elephant") 
