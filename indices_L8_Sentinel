@@ -1,0 +1,121 @@
+### Extracting vegetation indices from sentinel 2 and landsat 8###
+
+# Load needed packages
+library(raster)
+library(rgdal)
+library(dplyr)
+library(maptools)
+library(ggplot2)
+
+#Read in buffers
+buffer500<- shapefile("G:/Landsat/500m_buffer.shp")
+dim(buffer500)
+plot(buffer500)
+
+#Useful list of spectral indices: https://giscrack.com/list-of-spectral-indices-for-sentinel-and-landsat/
+#NDVI = (NIR – Red) / (NIR + Red)
+#NDVI (Landsat 8) = (B5 – B4) / (B5 + B4)
+#NDVI (Sentinel 2) = (B8 – B4) / (B8 + B4)
+
+#Landsat 8
+red_L8 = raster("LC08_L1TP_169061_20190920_20190926_01_T1_B4.TIF")
+NIR_L8 = raster("LC08_L1TP_169061_20190920_20190926_01_T1_B5.TIF")
+
+#Sentinel 2
+red_S2=raster("T36MYD_20181118T075209_B04.jp2")
+NIR_S2=raster("T36MYD_20181118T075209_B08.jp2")
+NIR_S2_A=raster("T36MYD_20181118T075209_B8A.jp2")
+SWIR_S2=raster("T36MYD_20181118T075209_B12.jp2")
+summary(SWIR_S2)
+
+#Process from now is the same for either satellite :
+ndvi_S2 = (NIR_S2 - red_S2) / (NIR_S2 + red_S2)
+
+#Extract mean ndvi for each 500m buffer around CT site
+ext_mean<-extract(ndvi_S2,buffer500, fun=mean)
+summary(ext_mean)
+head(ext_mean)
+
+#Extract min ndvi for each 500m buffer around CT site
+ext_min<-extract(ndvi_S2,buffer500, fun=min)
+summary(ext_min)
+head(ext_min)
+
+#Extract max ndvi for each 500m buffer around CT site
+ext_max<-extract(ndvi_S2,buffer500, fun=max)
+summary(ext_max)
+head(ext_max)
+
+#Create column with site names
+sitenames<-buffer500$site
+summary(sitenames)
+
+#Combine site name and mean NDVI column
+NDVI_500mbuffer<-cbind(sitenames, ext_mean, ext_min,ext_max)
+NDVI_500mbuffer<-as.data.frame(NDVI_500mbuffer)
+colnames(NDVI_500mbuffer) <- c("Site", "Mean NDVI", "Minimum NDVI", "Maximum NDVI")
+head(NDVI_500mbuffer)
+
+write.csv(NDVI_500mbuffer, "NDVI_500m_Sentinel_20181118.csv")
+
+### SOIL ADJUSTED VEGETATION INDEX (SAVI)
+#Formula of SAVI = ((NIR – R) / (NIR + R + L)) * (1 + L)
+#L= soil brightness correction factor, defined as 0.5 to accomodate most land cover types
+#SAVI (Sentinel 2) = (B08 – B04) / (B08 + B04 + 0.428) * (1.428)
+savi_S2 = (NIR_S2 - red_S2) / (NIR_S2 + red_S2+0.428)*(1.428)
+plot(savi_S2)
+#Extract mean savi for each 500m buffer around CT site
+ext_mean_savi<-extract(savi_S2,buffer500, fun=mean)
+summary(ext_mean_savi)
+head(ext_mean_savi)
+
+#Extract min savi for each 500m buffer around CT site
+ext_min_savi<-extract(savi_S2,buffer500, fun=min)
+summary(ext_min_savi)
+head(ext_min_savi)
+
+#Extract max savi for each 500m buffer around CT site
+ext_max_savi<-extract(savi_S2,buffer500, fun=max)
+summary(ext_max_savi)
+head(ext_max_savi)
+plot(savi_S2)
+#Combine site name and mean savi column
+savi_500mbuffer<-cbind(sitenames, ext_mean_savi, ext_min_savi,ext_max_savi)
+savi_500mbuffer<-as.data.frame(savi_500mbuffer)
+colnames(savi_500mbuffer) <- c("Site", "Mean savi", "Minimum savi", "Maximum savi")
+head(savi_500mbuffer)
+
+write.csv(savi_500mbuffer, "savi_500m_Sentinel_20181118.csv")
+
+###BURNED AREA INDEX
+### SOIL ADJUSTED VEGETATION INDEX (SAVI)
+#Formula of NBR = (NIR – SWIR) / (NIR+ SWIR)
+#NBRI (Sentinel 2) = (B8 – B12) / (B8 + B12)
+#Band 8 has 10m resolution and Band 12 has 20m resolution. Need Band 8A (20m resolution)to work
+#A high NBR value indicates healthy vegetation while a low value indicates bare ground and recently burnt areas. 
+#Non-burnt areas are normally attributed to values close to zero.
+
+nbri_S2 = (NIR_S2_A - SWIR_S2) / (NIR_S2_A + SWIR_S2)
+plot(nbri_S2)
+#Extract mean nbri for each 500m buffer around CT site
+ext_mean_nbri<-extract(nbri_S2,buffer500, fun=mean)
+summary(ext_mean_nbri)
+head(ext_mean_nbri)
+
+#Extract min nbri for each 500m buffer around CT site
+ext_min_nbri<-extract(nbri_S2,buffer500, fun=min)
+summary(ext_min_nbri)
+head(ext_min_nbri)
+
+#Extract max nbri for each 500m buffer around CT site
+ext_max_nbri<-extract(nbri_S2,buffer500, fun=max)
+summary(ext_max_nbri)
+head(ext_max_nbri)
+plot(nbri_S2)
+#Combine site name and mean nbri column
+nbri_500mbuffer<-cbind(sitenames, ext_mean_nbri, ext_min_nbri,ext_max_nbri)
+nbri_500mbuffer<-as.data.frame(nbri_500mbuffer)
+colnames(nbri_500mbuffer) <- c("Site", "Mean nbri", "Minimum nbri", "Maximum nbri")
+head(nbri_500mbuffer)
+
+write.csv(nbri_500mbuffer, "nbri_500m_Sentinel_20181118.csv")
