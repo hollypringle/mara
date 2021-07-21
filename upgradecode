@@ -1,0 +1,2473 @@
+###LOAD PACKAGES
+
+library(unmarked)
+library(here)
+library(dplyr)
+library(data.table)
+library(chron)
+library(rlist)
+library(ggplot2)
+library(tibble)
+library(jagsUI)
+library(wiqid)
+library(psych)
+
+###BUILDING 4-DAY MATRICES FOR NATIVE MAMMALS
+
+#Import tags and survey effort matrix
+tags<-read.csv("~/Occupancy/Main_files/Kenya2018_tagswithmeta_occupancy_5min_FINAL_coords.csv")
+tags <- rename(tags, Site = CT_site) #to match function below
+tags$DateTime <- as.Date(tags$DateTime,"%Y/%m/%d") # making sure date col is Date
+all_cams <- read.csv("~/Occupancy/Main_files/all_sites_effort_occupancy_csv.csv") 
+all_cams$Date <- as.Date(all_cams$Date, "%Y.%m.%d") # making sure date is Date
+
+#Remove first and last 4 days of survey effort matrix as not all cameras up throughout, and specify start and end date 
+all_cams<-all_cams[-(1:4), , drop = FALSE]
+all_cams<-all_cams[-(49:52), , drop = FALSE]
+startDate <- as.Date("2018-10-09","%Y-%m-%d")
+endDate <- as.Date("2018-11-25","%Y-%m-%d")
+
+#calcOcc function:
+calcOcc <-
+  function(species, # species name - in dataframe - that the function is to be run for
+           d = d, # dataframe with species, site, and each date it was seen at that site - must have a columns called Species, Site and DateTime
+           all_cams = all_cams, # matrix with all the survey dates, 1s for dates when a camera was working/deployed and NAs for when it wasn't
+           startDate = startDate,#start date in date format
+           endDate = endDate) {
+    # Make a vector of breaks
+    brks <-seq(startDate, endDate, by = "day")   #makes a sequence of all the days from start to end
+    
+    # Create an empty matrix of dim sites x time periods
+    occ <-matrix(0, ncol = length(unique(d$Site)), nrow = length(brks))
+    colnames(occ) <- sort(unique(d$Site))
+    rownames(occ) <- strftime(brks, format = "%Y-%m-%d")
+    
+    for (s in unique(d$Site)) {
+      #this loops through each site and inserts 1's on days which there were captures
+      seen <- NA
+      captures <-na.omit(d$DateTime[d$Species == species & d$Site == s])
+      # Were animals seen at the site
+      seen <- which(brks %in% captures)
+      # If the species was seen, occ = 1
+      col_i <- which(colnames(occ) == s)
+      occ[seen, col_i] <- 1
+    }
+    
+    occ <- occ * all_cams[, 2:ncol(all_cams)]
+    print(paste0(species, " done!"))
+    species_name <- gsub(" ", "", species)
+    row.names(occ) <- brks
+    write.csv(occ, paste0("1d_matrix_", species_name, ".csv"))
+    return(occ)
+    
+    
+  }
+
+
+#Creating single day matrices:
+setwd("~/Occupancy/Matrices") #change direcory so matrices stored in folder
+
+# applying function to each species (label)
+lapply(
+  X = unique(tags$Species),
+  FUN = calcOcc,
+  d = tags,
+  all_cams=all_cams,
+  startDate = startDate,
+  endDate = endDate) # this will save CSVs of spp matrices in the working directory
+
+setwd("~/Occupancy") #change back
+
+#Aggregate days into survey occasions. Timestepper - creates matrices of a given timestep, can choose to include or exclude NAs.
+timestepper <- function(occ_in, timestep, na_mode = "include") {
+  if (na_mode == "include") {
+    occ_in[is.na(occ_in)] <-0   #replacing NAs with 0s if we want to include them in analysis.
+  }
+  
+  if (timestep > nrow(occ_in) / 2) {
+    print(paste(
+      "Time step is too large! Please reduce to",
+      nrow(occ_in) / 2 ,
+      "or less."
+    ))
+  } else {
+    start <- seq(1, nrow(occ_in), by = timestep)
+    end <- seq(timestep, nrow(occ_in), by = timestep)
+    
+    if (length(start) > length(end)) {
+      start <- start[-length(start)]
+    }
+    
+    timesteps <- matrix(nrow = length(start), ncol = ncol(occ_in))
+    colnames(timesteps) <- colnames(occ_in)
+    rownames(timesteps) <-
+      paste(rownames(occ_in)[start], rownames(occ_in)[end], sep = ":")
+    
+    for (i in 1:length(start)) {
+      timestep_out <- colSums(occ_in[start[i]:end[i], ])
+      timesteps[i, ] <- timestep_out
+      timesteps[timesteps > 0] <- 1
+    }
+    
+    timesteps <- t(timesteps)
+    return(timesteps)
+    
+  }
+  
+}
+
+#Reading in all CSVs with spp presence absence
+
+filenames <- list.files("D:/Occupancy/Matrices", pattern="*.csv", full.names=TRUE)
+ldf <- lapply(filenames, read.csv)
+head(ldf)
+label <- basename(filenames)
+label <- sub(pattern=".csv", replace="",label)
+label <- sub(pattern="1d_matrix_", replace="",label)
+names(ldf) <- label
+new_list <- lapply(ldf, function(x) x%>% select(-X)) # eliminating col "X" with dates before applying timestepper func
+new_list[[1]]
+
+#Applying timestepper function to aggregate into 4-day occasions:
+matrix_4d <- lapply(X = new_list,
+                    FUN = timestepper,
+                    timestep = 4,
+                    na_mode = "exclude")  # must be exclude otherwise will consider days when CT wasn't working as actual survey days
+matrix_4d[[1]]
+names(matrix_4d) <- label # adding species names
+matrix_native_4d <- matrix_4d[c(1,2,4,6,8,9,10,15,17,20,23,24,31,32,33,34,35,37,38,40,41,43,44,45,47,49,50,51,52,53,55,59,61,64,67,70,73,74,75,76,77,78)] # keeping only native mammals
+names(matrix_native_4d)
+write.csv(matrix_native_4d, "matrix_native_4d.csv")
+
+###COMPILING SITE COVARIATES
+
+site.covs <- read.csv("D:/Occupancy/Main_Files/site.info.2.csv")
+
+#Load in veg indices and combine with site covariates
+indices <- read.csv("D:/Occupancy/Main_Files/sentinel_indices.csv")
+
+#Remove specific sites: 
+#Following sites did not exist for 2018 survey:
+site.covs<-site.covs[site.covs$area!="PD",]
+site.covs<-site.covs[site.covs$site!="MT06",] 
+site.covs<-site.covs[site.covs$site!="MT50",]
+site.covs<-site.covs[site.covs$site!="NB13",]
+
+#Following sites were inactive (NA) for all 4-Day time steps, so removed:
+site.covs<-site.covs[site.covs$site!="MN24",]
+site.covs<-site.covs[site.covs$site!="MN26",]
+site.covs<-site.covs[site.covs$site!="MT04",]
+site.covs<-site.covs[site.covs$site!="MT09",]
+site.covs<-site.covs[site.covs$site!="MT21",]
+site.covs<-site.covs[site.covs$site!="NB02",]
+site.covs<-site.covs[site.covs$site!="OMC06",]
+
+names(site.covs)
+names(indices)
+site.covs<-merge(site.covs,indices, by="site", all.x=T)
+grass_height<-read.csv("D:/Occupancy/Main_Files/2018_grassheight_cov_avg.csv")
+site.covs<-merge(site.covs,grass_height, by="site", all.x=T)
+write.csv(site.covs, "site.covs_indices_grass.csv")
+
+#Exploring correlation of site covariates
+site.covs$X<-NULL
+names(site.covs)
+covs_numeric <- site.covs[,c(5,14,18,19,20,29,130,179,193,196)]
+covs_numeric <- as.data.frame(scale(covs_numeric))
+names(covs_numeric)
+pairs.panels(covs_numeric, scale=FALSE)
+cor.plot
+covs_numeric$CT_site <- site.covs$site
+#covs_numeric <- covs_numeric[-1,]
+names(covs_numeric)
+covs_numeric
+cor.test(covs_numeric$Mean.NDVI,covs_numeric$propopen500m)
+
+#Add cattle occupancy according to model
+nrow(site.covs)
+names(matrix_4d)
+cattle<-list.extract(matrix_4d, 16)
+cattle.na<-cattle[rowSums(is.na(cattle)) != ncol(cattle), ] #remove sites with NA all the way through
+nrow(cattle.na)
+
+#Cattle occupancy
+umf.cattle<-unmarkedFrameOccu(y=cattle.na, siteCovs=site.covs)
+mfulcattle<-occu(~tree_shrub_density+Avg_grass
+                 ~ propopen500m+waterdist_short+humdist_short+Mean.nbri+Mean.NDVI,data=umf.cattle)
+summary(mfulcattle)
+re3 <- ranef(mfulcattle) 
+post.arr3<-as(re3, "array")
+post.arr3<-as.data.frame(post.arr3)
+post.arr3$site<-site.covs$site # adding site 
+head(post.arr3)
+tail(post.arr3)
+post.arr3 <- rename(post.arr3, cattle.occ.new=2)
+site.covs$cattle.occ<-post.arr3$cattle.occ
+head(site.covs)
+write.csv(site.covs, "site.covs_cattle.occ.csv")
+
+#Exploring correlation of cattle covariates
+site.covs$X<-NULL
+names(site.covs)
+covs_numeric.cattle <- site.covs[,c(28,29,130,203)]
+covs_numeric.cattle <- as.data.frame(scale(covs_numeric.cattle))
+names(covs_numeric.cattle)
+pairs.panels(covs_numeric.cattle, scale=FALSE)
+covs_numeric$CT_site <- site.covs$site
+#covs_numeric <- covs_numeric[-1,]
+names(covs_numeric)
+covs_numeric
+cor.test(covs_numeric$Mean.NDVI,covs_numeric$propopen500m)
+
+#SINGLE SPECIES MODELS
+
+###Standardize covariates for JAGS
+tree_shrub_densityS <- standardize(site.covs$tree_shrub_density)
+Avg_grassS <- standardize(site.covs$Avg_grass)
+propopen500mS <- standardize(site.covs$propopen500m)
+waterdist_shortS <- standardize(site.covs$waterdist_short)
+humdist_shortS <- standardize(site.covs$humdist_short)
+Mean.nbriS <- standardize(site.covs$Mean.nbri)
+Mean.NDVIS <- standardize(site.covs$Mean.NDVI)
+cattle_freqS <- standardize(site.covs$cattle_freq)
+shoat_freqS <- standardize(site.covs$shoat_freq)
+cattle_occS<-standardize(site.covs$cattle.occ)
+
+###Unmarked Occupancy
+names(matrix_native_4d)
+wildebeest<-list.extract(matrix_native_4d,40)
+wildebeest.na<-wildebeest[rowSums(is.na(wildebeest)) != ncol(wildebeest), ]
+nrow(wildebeest.na)
+wildebeestdf<-as.data.frame(wildebeest.na)
+wildebeestdf<-rownames_to_column(wildebeestdf, var = "site")
+wildebeestdf<- wildebeestdf[order(wildebeestdf$site),] #make sure sites are in order
+site.covs<- site.covs[order(site.covs$site),]  #make sure sites are in order
+
+#check numbers
+nrow(wildebeestdf)
+nrow(site.covs)
+wildebeest<-as.matrix(wildebeestdf[,-1])
+umf.wildebeest<-unmarkedFrameOccu(y=wildebeest, siteCovs=site.covs)
+mfulwildebeest<-occu(~tree_shrub_density+Avg_grass
+                 ~ propopen500m+waterdist_short+humdist_short+Mean.nbri+Mean.NDVI+cattle_freq+shoat_freq,data=umf.wildebeest)
+summary(mfulimpala)
+
+###Model selection and plot
+drg.impala <- dredge(mfulimpala, rank = AIC) #, fixed = ('psi(pa_type)')) #dredging models
+drg.impala
+avgfull.impala <-model.avg(drg.impala, subset = cumsum(weight) <= .95, fit=T) 
+summary(avgfull.impala) #model-average estimates considering models up to cumulative AIC weight of .95
+
+#predicting occupancy based on continuous variable
+
+#Cattle trap rate
+range(site.covs$cattle_freq)
+newDataCattle=data.frame(cattle_freq=seq(0,476.1905,by=0.1), propopen500m=0, waterdist_short=0, humdist_short=0, Mean.nbri=0, Mean.NDVI=0, shoat_freq=0)
+pred.avgfull.cattle.impala<-predict(avgfull.impala, type="state", se.fit=TRUE, full=T, newDataCattle)
+prdOccuimpala.cattle <- as.data.frame(pred.avgfull.cattle.impala)
+prdOccuimpala.cattle$cattle_freq <- newDataCattle$cattle_freq
+prdOccuimpala.cattle
+
+impalacattleplot<-ggplot(prdOccuimpala.cattle, aes(x=cattle_freq, y=fit)) +
+  theme_bw()+ # white background (as opposed to the default grey)
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_ribbon(aes(ymin= fit-(se.fit*1.96), ymax=fit+(se.fit*1.96)), alpha=0.2)+
+  coord_cartesian(ylim = c(0, 1), xlim = c(0, 500))+
+  geom_line(size=1,colour="blue")+
+  theme(axis.title.x = element_text(size=8),
+        axis.title.y = element_text(size=8),
+        axis.text.x  = element_text(size=8),
+        axis.text.y  = element_text(size=8)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Cattle trap rate")+
+  ggtitle("impala")
+    
+impalacattleplot
+
+###JAGS model
+jagsData_wildebeest <- list(y=wildebeest,  nSites = nrow(y), nDates=ncol(y), shrub=tree_shrub_densityS, grass=Avg_grassS,prop=propopen500mS, water=waterdist_shortS, hum=humdist_shortS,nbri=Mean.nbriS, ndvi=Mean.NDVIS, cattle=cattle_freqS, shoat=shoat_freqS)
+
+str(jagsData_wildebeest)
+y<-wildebeest
+zst_wildebeest <- apply(y, 1, max, na.rm=T)   
+head(zst_wildebeest)
+nrow(y)
+inits_wildebeest <- function(){list(z = zst_wildebeest, mean.p = runif(1), aShrub = runif(1), aGrass= runif(1),bProp = runif(1), bWater = runif(1), bHum = runif(1), bNdvi = runif(1),bNbri = runif(1), bCattle = runif(1), bShoat = runif(1))}
+                         
+params_wildebeest <- c("alpha0", "aShrub", "aGrass","beta0", "bProp", "bWater", "bHum","bNdvi", "bNbri","bCattle","bShoat",
+            "N.occ", "psi.fs")#, "z") # Also estimate z = "conditional occ. prob."
+
+ni <- 40000  ;   nt <- 10   ;   nb <- 10000  ;   nc <- 3
+
+outwildebeest<- jags(jagsData_wildebeest, inits_wildebeest, params_wildebeest, "Occupancy_Full_Kenya", n.chains = nc, 
+                    n.thin = nt, n.iter = ni, n.burnin = nb, parallel=T)
+
+print(outwildebeest, dig = 3)
+mcmcOutput::diagPlot(outimpala)
+outimpalaB <- mcmcOutput(outimpala, default='psi')
+plot(outimpalaB)
+
+#Plot 
+range(site.covs$cattle_freq)
+cattle_trap <- seq(0.0000, 476.1905, length=101)
+cattle_trapS <- standardize2match(cattle_trap, site.covs$cattle_freq)
+logit.psi <- with(outwildebeest$mean, beta0 + bCattle * cattle_trapS)
+psi <- plogis(logit.psi)
+plot(cattle_trap, psi, type='l')
+
+toplot <- matrix(NA, 101, 3)
+for(i in 1:101) {
+  logit.psi.tmp <- with(outwildebeest$sims.list, 
+                        beta0 + bCattle * cattle_trapS[i])
+  psi.tmp <- plogis(logit.psi.tmp)
+  toplot0[i, 1] <- mean(psi.tmp)
+  toplot0[i, 2:3] <- hdi(psi.tmp)
+}
+plot(cattle_trap, toplot[, 1], ylim=0:1, type='n', las=1,
+     xlab="Cattle trap rate", ylab="wildebeest occupancy")
+polygon(x=c(cattle_trap, rev(cattle_trap)),
+        y=c(toplot0[, 2], rev(toplot0[, 3])),
+        col=adjustcolor('yellow', 0.5), border=NA)
+lines(cattle_trap, toplot0[, 1], lwd=2, col='brown')
+
+
+###Completed outputs:
+
+print(outbuffalo, dig = 3)
+mcmcOutput::diagPlot(outbuffalo)
+outbuffaloB <- mcmcOutput(outbuffalo, default='psi')
+plot(outbuffaloB )
+
+print(outeland, dig = 3)
+mcmcOutput::diagPlot(outeland)
+outelandB <- mcmcOutput(outeland, default='psi')
+plot(outelandB )
+
+print(outelephant, dig = 3)
+mcmcOutput::diagPlot(outelephant)
+outelephantB <- mcmcOutput(outelephant, default='psi')
+plot(outelephantB )
+
+print(outthomsons, dig = 3)
+mcmcOutput::diagPlot(outthomsons)
+outthomsonsB <- mcmcOutput(outthomsons, default='psi')
+plot(outthomsonsB )
+```
+###################################################################################################
+
+# Multi-species occupancy models #
+#Based on:
+# Ferreira et al 2020, Biological Conservation https://doi.org/10.1016/j.biocon.2020.108762
+
+  # model with single hyper-parameter; used for spp-level inference and species richness
+  
+  # Based largely on Zipkin's et al 2010 code with inputs from Kery & Royle 2016
+  # Earlier versions influenced by Kery & Royle 2016 (Chap 11 in AHME)
+
+###################################################################################################
+
+##### Loading and preparing data #####
+
+# Step 1 - load data and construct 3D array (sites X occasions X species)
+# loading 1/0 matrix for 177 sites (rows) stacked by 72 spp (40 recorded + 32 augmented)
+# need to remove NA sites- 7 sites
+
+library(abind)
+library(rlist)
+library(unmarked)
+library(here)
+library(dplyr)
+library(data.table)
+library(chron)
+library(rlist)
+library(ggplot2)
+library(tibble)
+library(jagsUI)
+library(wiqid)
+library(psych)
+
+nrow(matrix_native_4d)
+matrix_native_4d.noNA<-lapply(matrix_native_4d, function(x) x[rowSums(is.na(x)) != ncol(x),]) #remove rows with all NA
+names(matrix_native_4d.noNA)
+matrix_native_4d.noNA_updated <- matrix_native_4d.noNA[names(matrix_native_4d.noNA) %in% c("gerbil", "springhare") == FALSE]
+names(matrix_native_4d.noNA_updated)
+X <- abind(matrix_native_4d.noNA_updated, along=3)
+testaug<-sum(list.extract(matrix_native_4d.noNA_updated, 70), na.rm=T)
+str(X)
+n <- dim(X)[3]-32 # number of observed spp (total n of species minus the number of augmented species)
+nzeroes <- dim(X)[3]-40 # number of augmented (all 0) species in the data set
+J <- dim(X)[1] # number of CT sites
+Ktemp <- X[,,1]
+Ktemp[Ktemp==0] <- 1  # 1 indicates CT was working, therefore a valid survey occasion
+Ktemp[is.na(Ktemp)] <- 0 # 0 indicates CT was NOT working, therefore not a valid survey occasion and represented as NA in the species presence-abs matrix
+Knamed <- rowSums(Ktemp) # sum of rows (i.e. of 1s) indicate numberr of valid survey occasions at each site
+K <- unname(Knamed) # number of surveys at each CT site
+Knamed-K # fine, all 0
+K <- as.integer(K)
+unique(K)
+length(K) # must match number of CT sites - ok
+
+# Step 2 - load covariates data
+covs <- read.csv("site.covs_indices_grass.csv", header=T) # continuous variables are scaled
+names(covs)
+tail(covs)
+
+#Check order of sites
+hare<-list.extract(matrix_native_4d.noNA, 17) #check
+tail(hare)
+haredf<-as.data.frame(hare) #check
+haredf<-setDT(haredf, keep.rownames = TRUE[])
+head(haredf)
+tail(haredf)
+covs_ordered <- covs[match(haredf$rn,covs$site),] #matching order of sites
+head(covs_ordered)
+tail(covs_ordered)
+names(covs_ordered)
+shoat_update<-read.csv("shoatfrequency_updated.csv")
+shoat_update<-select(shoat_update, CT_site,Abundance)
+colnames(shoat_update)<-c("site", "shoat_frequency_updated")
+cattle_update<-read.csv("cattlefrequency_updated.csv")
+cattle_update<-select(cattle_update, CT_site,Abundance)
+colnames(cattle_update)<-c("site", "cattle_frequency_updated")
+head(cattle_update)
+head(shoat_update)
+covs_ordered_updated<-merge(covs_ordered, cattle_update, by="site")
+covs_ordered_updated<-merge(covs_ordered_updated, shoat_update, by="site")
+covs_ordered_updated<- covs_ordered_updated[match(covs_ordered$site,covs_ordered_updated$site),]
+covs_ordered_updated<-select(covs_ordered_updated, -c(1:5)) #removing irrelevant columns to make easier to process
+covs_ordered_updated_test<-select(covs_ordered_updated, -c(2,3))
+covs_ordered_updated_test<-select(covs_ordered_updated_test, -c(12,15,22:25,32,35:49))
+covs_ordered_updated_test<-select(covs_ordered_updated_test, -c(29:50))
+covs_ordered_updated_test<-select(covs_ordered_updated_test, -c(29:50))
+covs_ordered_updated_test<-select(covs_ordered_updated_test, -c(29:32,34:46))
+covs_ordered_updated_test<-select(covs_ordered_updated_test, -c(32:46))
+covs_ordered_updated_test<-select(covs_ordered_updated_test, -c(33:50))
+covs_ordered_updated_test<-select(covs_ordered_updated_test, -c(33:50))
+covs_ordered_updated_test<-select(covs_ordered_updated_test, -c(33:44))
+covs_ordered_updated_test<-select(covs_ordered_updated_test, -c(34:46))
+
+
+names(matrix_native_4d.noNA_updated)
+vervet<-list.extract(matrix_native_4d.noNA_updated, 35) #check order
+
+write.csv(covs_ordered_updated_test,"site_covariates_final_occ.csv")
+covs_ordered_updated_test<-read.csv("site_covariates_final_occ.csv")
+names(covs_ordered_updated_test)
+head(covs_ordered_updated_test)
+tail(covs_ordered_updated_test)
+covs_ordered_updated_test$X<-NULL
+covs_numeric_updated <- covs_ordered_updated_test[,c(5,13,17,34,37,44,45,23)]
+covs_numeric_updated <- as.data.frame(scale(covs_numeric_updated))
+names(covs_numeric_updated)
+pairs.panels(covs_numeric_updated, scale=FALSE)
+covs_numeric_updated$CT_site <- covs_numeric_updated$site
+cor_plot <- function(data, method=c("pearson", "kendall", "spearman"),
+                     sort=FALSE,
+                     axis_text_size=12,
+                     number_text_size=3,
+                     legend=FALSE){
+  method <- match.arg(method)
+  index <- sapply(data, is.numeric)
+  qdata <- data[index]
+  qdata <- na.omit(qdata)
+  # bind global variables to keep check from warning
+  r <- stats::cor(qdata, method=method)
+  p <- ggcorrplot(r,
+                  hc.order = sort,
+                  colors = c("blue", "white", "red"),
+                  type = "lower",
+                  lab = TRUE,
+                  lab_size=number_text_size,
+                  show.legend=legend)
+  n <- format(nrow(qdata), big.mark=",")
+  if (method == "pearson"){
+    subtitle <- paste0("Pearson correlations (n = ",n, ")")
+  }
+  if (method == "spearman"){
+    subtitle <- paste0("Spearman rank order correlations (n = ",n, ")")
+  }
+  if (method == "kendall"){
+    subtitle <- paste0("Kendall rank order correlations (n = ",n, ")")
+  }
+  p <- p + labs(title = "Correlation Matrix",
+                subtitle = subtitle) +
+    theme(axis.text.x=element_text(size=axis_text_size),
+          axis.text.y=element_text(size=axis_text_size),
+          plot.subtitle = element_text(size=8,
+                                       face="plain"))
+  return(p)
+}
+covs_numeric_updated %>% cor_plot()
+#covs_numeric <- covs_numeric[-1,]
+names(covs_numeric_updated)
+cor.test(covs_numeric_updated$Mean.NDVI,covs_numeric_updated$propopen500m)
+#standardize is the same as scale
+tree_shrub_density <- standardize(covs_ordered_updated_test$tree_shrub_density)
+Avg_grass <- standardize(covs_ordered_updated_test$Avg_grass)
+propopen <- standardize(covs_ordered_updated_test$propopen500m)
+waterdist <- standardize(covs_ordered_updated_test$waterdist_short)
+humdist <- standardize(covs_ordered_updated_test$humdist_short)
+NBRI <- standardize(covs_ordered_updated_test$Mean.nbri)
+NDVI <- standardize(covs_ordered_updated_test$Mean.NDVI)
+cattle_rate <- standardize(covs_ordered_updated_test$cattle_frequency_updated)
+shoat_rate <- standardize(covs_ordered_updated_test$shoat_frequency_updated)
+past_livestock<-standardize(covs_ordered_updated_test$livestock_avg_500m)
+range((covs_ordered_updated_test$shoat_frequency_updated))
+new_map_df<-data.frame(covs_ordered_updated_test$site)
+new_map_df$humdist<-humdist
+new_map_df$cattle_rate<-cattle_rate
+new_map_df$shoat_rate<-shoat_rate 
+new_map_df$past_livestock<-past_livestock
+new_map_df$site<-covs_ordered_updated_test$site
+new_map_df$longitude<-covs_ordered_updated_test$longitude
+new_map_df$latitude<-covs_ordered_updated_test$latitude
+write.csv(new_map_df, "new_map_df2.csv")
+# Step 3 - Bundle and summarize data
+
+str(sp.data <- list(n = n, nzeroes = nzeroes, J = J, K = K, X = X,
+                    tree_shrub_density = tree_shrub_density, 
+                    Avg_grass = Avg_grass, propopen = propopen, NDVI = NDVI, NBRI=NBRI, waterdist=waterdist, humdist=humdist, cattle_rate=cattle_rate, shoat_rate=shoat_rate, past=past_livestock))
+
+
+# Step 4 - Defining initial values for the MCMC
+wst <- rep(1, n+nzeroes)                   # Simply set everybody at occurring
+zst <- array(1, dim = c(J, n+nzeroes)) # ditto
+# wst and zst are as suggested by Kery & Royle 2015; this is diff from Zipkin et al 2010
+
+sp.inits <- function() {
+  omegaGuess = runif(1, n/(n+nzeroes), 1)
+  psi.meanGuess = runif(1, .25,1)
+  list(omega=omegaGuess, Z = zst, w = wst, alpha0=rnorm(n = n+nzeroes), 
+       alphaOpen = rnorm(n = n+nzeroes), 
+       alphaWater = rnorm(n = n+nzeroes), alphaNDVI = rnorm(n = n+nzeroes), 
+       alphaNBRI=rnorm(n = n+nzeroes), alphaHum= rnorm(n = n+nzeroes), 
+       alphaCattle=rnorm(n = n+nzeroes), alphaShoat=rnorm(n = n+nzeroes),alphaPast=rnorm(n = n+nzeroes), beta0=rnorm(n = n+nzeroes), 
+       betaShrub = rnorm(n = n+nzeroes), betaGrass = rnorm(n = n+nzeroes))
+}
+#### Multi-spp model, 1 Hyper-parameter only ####
+
+# parameters to monitor
+params1 <- c("omega", 
+             "mu.alpha0","mu.alphaOpen", "mu.alphaWater", "mu.alphaNDVI", 
+             "mu.alphaNBRI", "mu.alphaHum", "mu.alphaCattle","mu.alphaShoat", "mu.alphaPast", "mu.beta0",
+             "mu.betaGrass", "mu.betaShrub", "alpha0",
+             "alphaOpen", "alphaWater", "alphaNDVI", 
+             "alphaNBRI", "alphaHum", "alphaCattle","alphaShoat", "alphaPast","beta0",
+             "betaGrass", "betaShrub", 
+             "Nocc.fs","PropOcc.fs",
+             "Nsite", 
+             "Ntotal", "Omega","c.hat.sp", "c.hat", "bpv.sp", "bpv", 
+             "spp.Pvalue", "overall.Pvalue"
+            )
+
+
+
+# MCMC settings
+ni <- 150000   ;   nt <- 10   ;   nb <- 50000   ;   nc <- 3
+
+# Run JAGS, check convergence and summarize posteriors
+library(jagsUI)
+
+outD_Kenya <- jags(sp.data, sp.inits, params1, "model_C_Kenya", 
+                   n.chains = nc, n.thin = nt, n.iter = ni, n.burnin = nb, parallel = TRUE)
+outE_Kenya <- jags(sp.data, sp.inits, params1, "model_C_Kenya", 
+                   n.chains = nc, n.thin = nt, n.iter = ni, n.burnin = nb, parallel = TRUE)
+outF_Kenya <- jags(sp.data, sp.inits, params1, "model_F_Kenya", 
+                   n.chains = nc, n.thin = nt, n.iter = ni, n.burnin = nb, parallel = TRUE) #water, prop, humdist, pastlivestock, shoat freq, cattle freq, mean nbri
+ 
+modelFsummary<-print(outF_Kenya, dig = 3)
+modelFsummary<-as.data.frame(outF_Kenya$summary)
+head(modelFsummarydf)
+modelFsummarydf<-setDT(modelFsummary, keep.rownames = TRUE[])
+highrhat<-subset(modelFsummary, modelFsummary$Rhat>1.05)
+overlapzero<-subset(modelFsummary, modelFsummary$overlap0==0)
+
+modelEsummary<-print(outE_Kenya, dig = 3)
+modelEsummary<-as.data.frame(outE_Kenya$summary)
+
+modelEsummarydf<-setDT(modelEsummary, keep.rownames = TRUE[])
+head(modelEsummarydf)
+highrhat<-subset(modelEsummary, modelEsummary$Rhat>1.05)
+overlapzero<-subset(modelEsummary, modelEsummary$overlap0==0)
+
+#AFTER UPDATED TRAP RATES
+outG_Kenya_rodupdate <- jags(sp.data, sp.inits, params1, "model_F_Kenya", 
+                   n.chains = nc, n.thin = nt, n.iter = ni, n.burnin = nb, parallel = TRUE) #water, prop, humdist, pastlivestock, shoat freq, cattle freq, mean nbri
+
+outG_Kenya_rodsummary<-print(outG_Kenya_rodupdate, dig = 3)
+outG_Kenya_rodsummary<-as.data.frame(outG_Kenya_rodupdate$summary)
+
+outG_Kenya_rodsummarydf<-setDT(outG_Kenya_rodsummary, keep.rownames = TRUE[])
+head(outG_Kenya_rodsummarydf)
+highrhat<-subset(outG_Kenya_rodsummary,outG_Kenya_rodsummary$Rhat>1.05)
+overlapzero<-subset(outG_Kenya_rodsummary, outG_Kenya_rodsummary$overlap0==0)
+#Plotting
+library(envnames)
+library(qdapRegex)
+library(ggplot2)
+matrixnames<-as.data.frame(names(matrix_native_4d.noNA_updated))
+matrixnamesdf<-setDT(matrixnames, keep.rownames = TRUE[])
+colnames(matrixnamesdf)[1]<-"species_no"
+colnames(matrixnamesdf)[2]<-"species_name"
+matrixnamesdf<-edit(matrixnamesdf) #add edited column for species names which look nicer
+write.csv(matrixnamesdf, "matrixnamesG_updated.csv")
+matrixnamesdf<-as.data.frame(read.csv("matrixnamesG_updated.csv"))
+matrixnamesdf$species_no<-as.character(matrixnamesdf$species_no)
+outG_Kenya_rodsummarydf$species_no<-as.character(rm_between(outG_Kenya_rodsummarydf$rn,"[","]",extract=TRUE))
+head(outG_Kenya_rodsummarydf)
+head(matrixnamesdf)
+outG_Kenya_rodsummarydf <- merge(outG_Kenya_rodsummarydf,matrixnamesdf, by="species_no" )
+colnames(matrixnamesdf)[2]<-"old_species_name"
+#Shortest distance to water
+water_dist<-na.omit(outG_Kenya_rodsummarydf[grepl("Water", outG_Kenya_rodsummarydf[["rn"]])])
+water_dist<-water_dist[!grepl("Aug", water_dist$species_name),]
+overlapzero_water<-subset(water_dist, water_dist$overlap0==0)
+colnames(water_dist)[5]<-"lower"
+colnames(water_dist)[9]<-"upper"
+colnames(overlapzero_water)[5]<-"lower"
+colnames(overlapzero_water)[9]<-"upper"
+water_dist_community<-as.data.frame(outG_Kenya_rodsummarydf[grepl("mu.alphaWater", outG_Kenya_rodsummarydf[["rn"]])])
+water_plot<-water_dist%>%
+  arrange(mean) %>%    # First sort by val. This sort the dataframe but NOT the factor levels
+  mutate(new_species_name=factor(new_species_name, levels=new_species_name)) %>%   # This trick update the factor levels
+  ggplot(aes(x = new_species_name, y = mean) )+
+  geom_hline(yintercept=0)+
+  geom_boxplot(shape = "circle", fill = "#112446") +
+  geom_linerange(aes(x=new_species_name, ymin=lower, ymax=upper, colour="black", alpha=0.9, size=0.8))+
+  geom_linerange(data= overlapzero_water, aes(x=new_species_name, ymin=lower, ymax=upper), colour="blue", alpha=0.9, size=0.8)+
+  geom_hline(yintercept=-0.05437323, colour="green")+ #community mean
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(x = "new_species_name", y = "Parameter estimate")+
+  theme(legend.position = "none")+
+  theme(legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA))+
+xlab("")
+par(mar=c(4,7,2,1))
+
+#Distance to humans
+human_dist<-na.omit(outG_Kenya_rodsummarydf[grepl("Hum", outG_Kenya_rodsummarydf[["rn"]])])
+human_dist<-human_dist[!grepl("Aug", human_dist$species_name),]
+overlapzero_human<-subset(human_dist, human_dist$overlap0==0)
+colnames(human_dist)[5]<-"lower"
+colnames(human_dist)[9]<-"upper"
+colnames(overlapzero_human)[5]<-"lower"
+colnames(overlapzero_human)[9]<-"upper"
+human_dist_community<-as.data.frame(outG_Kenya_rodsummary[grepl("mu.alphaHum", outG_Kenya_rodsummary[["rn"]])])
+human_plot<-human_dist%>%
+  arrange(mean) %>%    # First sort by val. This sort the dataframe but NOT the factor levels
+  mutate(new_species_name=factor(new_species_name, levels=new_species_name)) %>%   # This trick update the factor levels
+  ggplot(aes(x = new_species_name, y = mean) )+
+  geom_hline(yintercept=0, linetype="dashed")+
+  geom_boxplot(shape = "circle", fill = "#112446") +
+  geom_linerange(aes(x=new_species_name, ymin=lower, ymax=upper, colour="black", alpha=0.9, size=0.8))+
+  geom_linerange(data= overlapzero_human, aes(x=new_species_name, ymin=lower, ymax=upper), colour="blue", alpha=0.9, size=0.8)+
+  geom_hline(yintercept=0.2802223, colour="purple", size=1)+ #community mean
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(x = "new_species_name", y = "Parameter estimate")+
+  labs(title = "Distance to human infrastructure")+
+  theme(legend.position = "none")+
+  theme(legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        panel.border = element_rect(fill=NA, size=0.5))+
+  xlab("")
+
+
+#aspect 940 597
+#Cattle detection rate
+cattle_rate_pl<-na.omit(outG_Kenya_rodsummarydf[grepl("Cattle", outG_Kenya_rodsummarydf[["rn"]])])
+cattle_rate_pl<-cattle_rate_pl[!grepl("Aug", cattle_rate_pl$new_species_name),]
+overlapzero_cattle<-subset(cattle_rate_pl, cattle_rate_pl$overlap0==0)
+colnames(cattle_rate_pl)[5]<-"lower"
+colnames(cattle_rate_pl)[9]<-"upper"
+colnames(overlapzero_cattle)[5]<-"lower"
+colnames(overlapzero_cattle)[9]<-"upper"
+cattle_community<-as.data.frame(outG_Kenya_rodsummary[grepl("mu.alphaCattle", outG_Kenya_rodsummary[["rn"]])])
+cattle_plot2<-cattle_rate_pl%>%
+  arrange(mean) %>% 
+  mutate(new_species_name=factor(new_species_name, levels=c("Baboon", "Coke's hartebeest", "Grant's gazelle", 
+                                                            "Dikdik", "Zorilla", "Impala", 
+                                                            "Vervet monkey", "Hare", "Bushbuck", "Aardwolf", "Bushbaby", "Genet", "Bat-eared fox", "Cheetah", "Porcupine", "Aardvark", "White-tailed mongoose", "Buffalo", "Hippopotamus", "Other mongoose", "Honey badger", "Caracal", "Lion","Leopard", "Wildebeest", "Striped hyena", "Topi", "Thomson's gazelle", "Waterbuck", "Banded mongoose", "Reedbuck", "Jackal", "Eland", "Elephant", "Spotted hyena", "Serval", "Warthog", "Giraffe", "Oribi", "Zebra"))) %>% # First sort by val. This sort the dataframe but NOT the factor levels
+   ggplot(aes(x = new_species_name, y = mean) )+
+  geom_boxplot(shape = "circle", fill = "#112446") +
+  geom_hline(yintercept=0, linetype="dashed")+
+  geom_linerange(aes(x=new_species_name, ymin=lower, ymax=upper, colour="black", alpha=0.9, size=0.8))+
+  geom_linerange(data= overlapzero_cattle, aes(x=new_species_name, ymin=lower, ymax=upper), colour="blue", alpha=0.9, size=0.8)+
+  geom_hline(yintercept=0.01437683, colour="purple", size=1)+ #community mean
+  theme(axis.text.x = element_text(angle = 90))+
+  theme(legend.position = "none")+
+  labs(x = "new_species_name", y = "Parameter estimate")+
+  labs(title = "Cattle detection rate")+
+  theme(legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        panel.border = element_rect(fill=NA, size=0.5))+
+  xlab("")
+
+
+#Shoat detection rate
+shoat_rate_pl<-na.omit(outG_Kenya_rodsummarydf[grepl("Shoat", outG_Kenya_rodsummarydf[["rn"]])])
+shoat_rate_pl<-shoat_rate_pl[!grepl("Aug", shoat_rate_pl$new_species_name),]
+overlapzero_shoat<-subset(shoat_rate_pl, shoat_rate_pl$overlap0==0)
+colnames(shoat_rate_pl)[5]<-"lower"
+colnames(shoat_rate_pl)[9]<-"upper"
+colnames(overlapzero_shoat)[5]<-"lower"
+colnames(overlapzero_shoat)[9]<-"upper"
+shoat_community<-as.data.frame(outG_Kenya_rodsummary[grepl("mu.alphaShoat", outG_Kenya_rodsummary[["rn"]])])
+shoat_plot2<-shoat_rate_pl%>%
+  arrange(mean) %>%    # First sort by val. This sort the dataframe but NOT the factor levels
+  mutate(new_species_name=factor(new_species_name, levels=c("Baboon", "Coke's hartebeest", "Grant's gazelle", 
+                                                            "Dikdik", "Zorilla", "Impala", 
+                                                            "Vervet monkey", "Hare", "Bushbuck", "Aardwolf", "Bushbaby", "Genet", "Bat-eared fox", "Cheetah", "Porcupine", "Aardvark", "White-tailed mongoose", "Buffalo", "Hippopotamus", "Other mongoose", "Honey badger", "Caracal", "Lion","Leopard", "Wildebeest", "Striped hyena", "Topi", "Thomson's gazelle", "Waterbuck", "Banded mongoose", "Reedbuck", "Jackal", "Eland", "Elephant", "Spotted hyena", "Serval", "Warthog", "Giraffe", "Oribi", "Zebra"))) %>% # First sort by val. This sort the dataframe but NOT the factor levels
+  # This trick update the factor levels
+  ggplot(aes(x = new_species_name, y = mean) )+
+  geom_boxplot(shape = "circle", fill = "#112446") +
+  geom_hline(yintercept=0, linetype="dashed")+
+  geom_linerange(aes(x=new_species_name, ymin=lower, ymax=upper, colour="black", alpha=0.9, size=0.8))+
+  geom_linerange(data= overlapzero_shoat, aes(x=new_species_name, ymin=lower, ymax=upper), colour="blue", alpha=0.9, size=0.8)+
+  geom_hline(yintercept=-0.008725054, colour="purple", size=1)+ #community mean
+  theme(axis.text.x = element_text(angle = 90))+
+  theme(legend.position = "none")+
+  labs(x = "new_species_name", y = "Parameter estimate")+
+  labs(title = "Shoat detection rate")+
+  theme(legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        panel.border = element_rect(fill=NA, size=0.5))+
+  xlab("")
+
+#Past livestock occupancy
+pastlive<-na.omit(outG_Kenya_rodsummarydf[grepl("Past", outG_Kenya_rodsummarydf[["rn"]])])
+pastlive<-pastlive[!grepl("Aug", pastlive$new_species_name),]
+overlapzero_past<-subset(pastlive, pastlive$overlap0==0)
+colnames(pastlive)[5]<-"lower"
+colnames(pastlive)[9]<-"upper"
+colnames(pastlive)[5]<-"lower"
+colnames(pastlive)[9]<-"upper"
+past_community<-as.data.frame(outG_Kenya_rodsummary[grepl("mu.alphaPast", outG_Kenya_rodsummary[["rn"]])])
+pastlive_plot2<-pastlive%>%
+  arrange(mean) %>%    # First sort by val. This sort the dataframe but NOT the factor levels
+  mutate(new_species_name=factor(new_species_name, levels=c("Baboon", "Coke's hartebeest", "Grant's gazelle", 
+                                                            "Dikdik", "Zorilla", "Impala", 
+                                                            "Vervet monkey", "Hare", "Bushbuck", "Aardwolf", "Bushbaby", "Genet", "Bat-eared fox", "Cheetah", "Porcupine", "Aardvark", "White-tailed mongoose", "Buffalo", "Hippopotamus", "Other mongoose", "Honey badger", "Caracal", "Lion","Leopard", "Wildebeest", "Striped hyena", "Topi", "Thomson's gazelle", "Waterbuck", "Banded mongoose", "Reedbuck", "Jackal", "Eland", "Elephant", "Spotted hyena", "Serval", "Warthog", "Giraffe", "Oribi", "Zebra"))) %>% # First sort by val. This sort the dataframe but NOT the factor levels
+  # This trick update the factor levels
+  ggplot(aes(x = new_species_name, y = mean) )+
+  geom_hline(yintercept=0, linetype="dashed")+
+  geom_boxplot(shape = "circle", fill = "#112446") +
+  geom_linerange(aes(x=new_species_name, ymin=lower, ymax=upper, colour="black", alpha=0.9, size=0.8))+
+  geom_linerange(data= overlapzero_shoat, aes(x=new_species_name, ymin=lower, ymax=upper), colour="blue", alpha=0.9, size=0.8)+
+  geom_hline(yintercept=0.003008957, colour="purple", size=1)+ #community mean
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(x = "new_species_name", y = "Parameter estimate")+
+  labs(title = "Past livestock occupancy")+
+  theme(legend.position = "none")+
+  theme(legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        panel.border = element_rect(fill=NA, size=0.5))+
+  xlab("")
+install.packages("ggpubr")
+library(ggpubr)
+figure <- ggarrange(water_plot, human_plot, cattle_plot,shoat_plot, pastlive_plot,
+                    labels = c("Distance from water", "Distance from human infrastructure", "Cattle detection rate", "Shoat detection rate", "Past livestock occupancy"),
+                    ncol = 1, nrow = )
+
+library(cowplot)
+grid.arrange(pastlive_plot, cattle_plot, shoat_plot,nrow = 3)
+plot_grid(pastlive_plot, cattle_plot, shoat_plot,nrow = 3, labels = c('Past livestock occupancy', 'Cattle trap rate', 'Shoat trap rate'))
+
+###SPECIES RICHNESS PLOTS
+vervetdf<-as.data.frame(vervet)
+vervetdf.test<-setDT(vervetdf.test, keep.rownames = TRUE[])
+head(vervetdf.test)
+tail(vervetdf.test)
+
+
+colnames(vervetdf.test)[1]<-"site_name"
+vervetdf.test<-vervetdf.test %>% mutate(site_no = 1:n())
+modelGsitedf<-modelGsummary
+outG_Kenya_rodrichnessdf<-outG_Kenya_rodsummarydf[grepl("Nsite", outG_Kenya_rodsummarydf[["rn"]])]
+outG_Kenya_rodrichnessdf$site_no<-rm_between(outG_Kenya_rodrichnessdf$rn,"[","]",extract=TRUE)
+tail(outG_Kenya_rodrichnessdf)
+vervetdf.test<-as.data.frame(vervetdf.test)
+vervetdf.test$site_no<-as.character(vervetdf.test$site_no)
+outG_Kenya_rodrichnessdf$site_no<-as.character(outG_Kenya_rodrichnessdf$site_no)
+vervetdf.test<-setDT(vervetdf.test, keep.rownames = TRUE[])
+colnames(vervetdf.test)[1]<-"site_no"
+vervetdf.test<-vervetdf.test %>% select(-3:-15) 
+vervetdf.test<-as.data.frame(vervetdf.test)
+
+outG_Kenya_rodrichnessdf <- merge(outG_Kenya_rodrichnessdf,vervetdf.test, by="site_no" )
+humdistrichness<-as.data.frame(humdist)
+humdistrichness<-setDT(humdistrichness, keep.rownames = TRUE[])
+head(humdistrichness)
+colnames(humdistrichness)[1]<-"site_no"
+outG_Kenya_rodrichnessdf  <- merge(outG_Kenya_rodrichnessdf ,humdistrichness, by="site_no" )
+shoat_raterichness<-as.data.frame(shoat_rate)
+shoat_raterichness<-setDT(shoat_raterichness, keep.rownames = TRUE[])
+head(shoat_raterichness)
+colnames(shoat_raterichness)[1]<-"site_no"
+outG_Kenya_rodrichnessdf <- merge(outG_Kenya_rodrichnessdf ,shoat_raterichness, by="site_no")
+range(outG_Kenya_rodrichnessdf$mean)
+cattle_raterichness<-as.data.frame(cattle_rate)
+cattle_raterichness<-setDT(cattle_raterichness, keep.rownames = TRUE[])
+head(cattle_raterichness)
+colnames(cattle_raterichness)[1]<-"site_no"
+outG_Kenya_rodrichnessdf <- merge(outG_Kenya_rodrichnessdf ,cattle_raterichness, by="site_no")
+
+pastliverichness<-as.data.frame(past_livestock)
+pastliverichness<-setDT(pastliverichness, keep.rownames = TRUE[])
+head(pastliverichness)
+colnames(pastliverichness)[1]<-"site_no"
+outG_Kenya_rodrichnessdf <- merge(outG_Kenya_rodrichnessdf ,pastliverichness, by="site_no")
+
+
+humrich_fit <- glm(mean ~ humdist, family=poisson, data=outG_Kenya_rodrichnessdf)
+
+
+humrich_fit_lm <- lm(mean ~ humdist, data=outG_Kenya_rodrichnessdf)
+summary(humrich_fit)
+summary(humrich_fit_lm)
+shoat_fit <- lm(mean ~ shoat_rate, data=outG_Kenya_rodrichnessdf)
+summary(shoat_fit)
+
+cattle_fit <- lm(mean ~ cattle_rate, data=outG_Kenya_rodrichnessdf)
+summary(cattle_fit)
+
+past_fit <- lm(mean ~ past_livestock, data=outG_Kenya_rodrichnessdf)
+summary(past_fit)
+
+install.packages("sjPlot")
+library(sjPlot)
+install.packages("statmod")
+plot_model(humrich_fit, type = "pred")
+
+?predict
+install.packages("devtools")
+library(devtools)
+install_github("timnewbold/StatisticalModels")
+
+
+nd<-data.frame(humdist=seq(from = min(humdist), to = max(humdist),length.out=100))
+preds <-predict.glm(humrich_fit, nd)
+plot(preds)
+#preds <- StatisticalModels::PredictGLMER(model = humrich_fit, data = nd,
+                                       #  se.fit = TRUE, seMultiplier = 1.96, randEffs = F)
+
+all_fit <- glm(mean ~ humdist+shoat_rate+cattle_rate+past_livestock+propopen+waterdist+NBRI+NDVI, family=poisson, data=outG_Kenya_rodrichnessdf)
+summary(all_fit)
+plot_model(all_fit, type = "pred")
+aic<-extractAIC(all_fit,k = 2)
+
+
+p_hum_rich <- ggplot(outG_Kenya_rodrichnessdf, aes(x=humdist, y=mean)) +
+  geom_point() +
+  geom_smooth(method=lm , color="black", se=TRUE)+
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  labs(x = "Distance to human infrastructure", y = "Overall species richness")+
+  theme(legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        panel.border = element_rect(fill=NA, size=0.5))
+
+      
+p_cattle_rich <- ggplot(outG_Kenya_rodrichnessdf, aes(x=cattle_rate, y=mean)) +
+  geom_point() +
+  geom_smooth(method=lm , color="black", se=TRUE)+
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  labs(x = "Cattle detection rate", y = "Overall species richness")+
+  theme(legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        panel.border = element_rect(fill=NA, size=0.5))
+p_shoat_rich <- ggplot(outG_Kenya_rodrichnessdf, aes(x=shoat_rate, y=mean)) +
+  geom_point() +
+  geom_smooth(method=lm , color="black", se=TRUE)+
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  labs(x = "Shoat detection rate", y = "Overall species richness")+
+  theme(legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        panel.border = element_rect(fill=NA, size=0.5))
+p_past_rich <- ggplot(outG_Kenya_rodrichnessdf, aes(x=past_livestock, y=mean)) +
+  geom_point() +
+  geom_smooth(method=lm , color="black", se=TRUE)+
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  labs(x = "Past livestock occupancy", y = "Overall species richness")+
+  theme(legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.background = element_rect(fill = "transparent"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        panel.border = element_rect(fill=NA, size=0.5))
+
+plot_grid(p_hum_rich, p_past_rich, p_cattle_rich, p_shoat_rich,nrow = 2)
+
+#### predicting hyperparameters management*Agric for each threat level####
+pred.humdist <- seq(from = min(humdist), to = max(humdist),length.out=100) # scaled values of prop Agric to plug into the prediction formula
+
+
+# now actually predicting
+str(tmp <- (outG_Kenya$sims.list))
+nsamp <- length (tmp[[1]]) # number of MCM samplings
+pred.humdist.arr <- array(NA,dim=c(100, nsamp))
+str(pred.humdist.arr)
+
+
+for(i in 1:nsamp){
+  pred.humdist.arr[,i] <- plogis(tmp$mu.alpha0[i] + tmp$mu.alphaHum[i] * pred.humdist) # interaction between Agric and manag PA for non-threat spp[i,1]
+    }
+str(pred.humdist.arr)
+
+pred.humdist.arr.mean <- apply(pred.humdist.arr, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.pred.humdist.arr.threat <- apply(pred.humdist.arr, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.pred.humdist.arr.threat <- cri.predmanagAgric.threat[1,,] # just spliting array into DF
+upper.predmanagAgric.threat <- cri.predmanagAgric.threat[2,,] # ditto
+full.predmanagAgric.threat <- as.data.frame(cbind(predmanagAgric.threat.mean, lower.predmanagAgric.threat, upper.predmanagAgric.threat))
+head(full.predmanagAgric.threat)
+names(full.predmanagAgric.threat) <- c("BZ_Agric.NT", 
+                                      )
+
+library(reshape2)
+tmp2 <- melt(full.predmanagAgric.threat) # will stack all collumns and create a new col with variable name
+tail(tmp2,20)  #checking
+tmp2[590:610,]#checking
+mean <- tmp2[1:600 ,]
+LCI <- tmp2[601:1200,]
+UCI <- tmp2[1201:1800,]
+tail(UCI)
+
+new.predmanagAgric.threat <- cbind(mean,LCI,UCI)
+head(new.predmanagAgric.threat)
+names(new.predmanagAgric.threat) <- c("var","mean","var","LCI", "var","UCI")
+
+new.predmanagAgric.threat$management <- c(rep("BZ",100), rep("NP",100), rep("OBZ",100), 
+                                          rep("BZ",100), rep("NP",100), rep("OBZ",100))
+#just checking
+new.predmanagAgric.threat[245:255,] #ok
+new.predmanagAgric.threat[495:505,]#ok
+
+
+###SPECIES
+#### predicting effect of agric for spp in which CRI doesn't overlap 0 ####
+# first, finding spp
+overlapzero_spp <- overlapzero[4:165,]
+overlapzero_spp <- overlapzero[4:165,]
+
+# predicting
+pred.humdist<- seq(from = min(humdist), to = max(humdist),length.out=100) # scaled values of prop Agric to plug into the prediction formula
+
+str(tmp <- (outG_Kenya$sims.list))
+nsamp <- length (tmp[[1]]) # number of MCM samplings
+spp.predhumdist <- array(NA,dim=c(100, nsamp, 7)) #3rd dimension is for the spp coeefs, only ones not overlapping 0
+str(spp.predhumdist)
+for(i in 1:nsamp){
+  spp.predhumdist[,i,1] <- plogis(tmp$alpha0[i,12] + tmp$alphaHum[i,12] * pred.humdist) # interaction between Agric and BZ for spp 1
+  spp.predhumdist[,i,2] <- plogis(tmp$alpha0[i,17] + tmp$alphaHum[i,17] * pred.humdist)
+  spp.predhumdist[,i,3] <- plogis(tmp$alpha0[i,22] + tmp$alphaHum[i,22] * pred.humdist)
+  spp.predhumdist[,i,4] <- plogis(tmp$alpha0[i,31] + tmp$alphaHum[i,31] * pred.humdist)
+  spp.predhumdist[,i,5] <- plogis(tmp$alpha0[i,34] + tmp$alphaHum[i,34] * pred.humdist)
+  spp.predhumdist[,i,6] <- plogis(tmp$alpha0[i,38] + tmp$alphaHum[i,38] * pred.humdist)
+  spp.predhumdist[,i,7] <- plogis(tmp$alpha0[i,41] + tmp$alphaHum[i,41] * pred.humdist) # agric and NP fo spp 2 
+}
+
+dimnames(spp.predhumdist)[[3]] <- c("Elephant", "Giraffe", "Spotted hyena", "Oribi",
+                                              "Serval", "Warthog",
+                                              "Zebra")
+spp.predhumdist.mean <- apply(spp.predhumdist, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predhumdist <- apply(spp.predhumdist, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predhumdist <- cri.spp.predhumdist[1,,] # just spliting array into DF
+upper.spp.predhumdist <- cri.spp.predhumdist[2,,] # ditto
+full.spp.predhumdist <- as.data.frame(cbind(spp.predhumdist.mean, lower.spp.predhumdist, upper.spp.predhumdist))
+head(full.spp.predhumdist)
+names(full.spp.predhumdist) <- c("Elephant", "Giraffe", "Spotted hyena", "Oribi",
+                                 "Serval", "Warthog",
+                                 "Zebra",
+                                           "LCI_Elephant", "LCI_Giraffe", "LCI_Spotted hyena", "LCI_Oribi",  
+                                           "LCI_Serval", "LCI_Warthog","LCI_Zebra","UCI_Elephant", "UCI_Giraffe", "UCI_Spotted hyena", "UCI_Oribi",  
+                                           "UCI_Serval", "UCI_Warthog",
+                                           "UCI_Zebra")
+
+library(reshape2)
+tmp3 <- melt(full.spp.predhumdist) # will stack all collumns and create a new col with variable name
+tail(tmp3,20)  #checking
+tmp3[995:1005,]#checking
+mean <- tmp3[1:700 ,]
+LCI <- tmp3[701:1400,]
+UCI <- tmp3[1401:2100,]
+tail(UCI)
+
+new.spp.human.pred <- cbind(mean,LCI,UCI)
+head(new.spp.human.pred)
+names(new.spp.human.pred) <- c("Species","mean","LowerVar","LCI", "UpperVar","UCI")
+
+
+library(dplyr)
+library(tidyr)
+
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.humdist<- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.humdist <- rbind(real.humdist, real.humdist, real.humdist,
+                      real.humdist, real.humdist, real.humdist,
+                      real.humdist) # stacking it 7 times, once per coeff predicted
+names(real.humdist) <- "humDist"
+new.spp.human.pred$humDist <- unlist(real.humdist)
+head(new.spp.human.pred)
+names(new.spp.human.pred) <- c("Species","mean","LowerVar","LCI", "UpperVar","UCI","humDist")
+
+ggplot(new.spp.human.pred, aes(x=humDist, y=mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Distance from humans")
+
+
+###Carnivores
+# predicting spp responses
+spp.predhumdist.cn<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predhumdist.cn)
+for(i in 1:nsamp){
+  spp.predhumdist.cn[,i,1] <- plogis(tmp$alpha0[i,2] + tmp$alphaHum[i,2] * pred.humdist) # interaction between Agric and BZ for spp 1
+  spp.predhumdist.cn[,i,2] <- plogis(tmp$alpha0[i,4] + tmp$alphaHum[i,4] * pred.humdist)
+  spp.predhumdist.cn[,i,3] <- plogis(tmp$alpha0[i,8] + tmp$alphaHum[i,8] * pred.humdist)
+  spp.predhumdist.cn[,i,4] <- plogis(tmp$alpha0[i,9] + tmp$alphaHum[i,9] * pred.humdist)
+  spp.predhumdist.cn[,i,5] <- plogis(tmp$alpha0[i,15] + tmp$alphaHum[i,15] * pred.humdist)
+  spp.predhumdist.cn[,i,6] <- plogis(tmp$alpha0[i,22] + tmp$alphaHum[i,22] * pred.humdist) 
+  spp.predhumdist.cn[,i,7] <- plogis(tmp$alpha0[i,23] + tmp$alphaHum[i,23] * pred.humdist)
+  spp.predhumdist.cn[,i,8] <- plogis(tmp$alpha0[i,25] + tmp$alphaHum[i,25] * pred.humdist)
+  spp.predhumdist.cn[,i,9] <- plogis(tmp$alpha0[i,26] + tmp$alphaHum[i,26] * pred.humdist)
+  spp.predhumdist.cn[,i,10] <- plogis(tmp$alpha0[i,27] + tmp$alphaHum[i,27] * pred.humdist)
+  spp.predhumdist.cn[,i,11] <- plogis(tmp$alpha0[i,34] + tmp$alphaHum[i,34] * pred.humdist)
+  spp.predhumdist.cn[,i,12] <- plogis(tmp$alpha0[i,42] + tmp$alphaHum[i,42] * pred.humdist)
+  }
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predhumdist.cn.mean <- apply(spp.predhumdist.cn, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predhumdist.cn <- apply(spp.predhumdist.cn, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predhumdist.cn <- cri.spp.predhumdist.cn[1,,] # just spliting array into DF
+upper.spp.predhumdist.cn <- cri.spp.predhumdist.cn[2,,] # ditto
+full.spp.predhumdist.cn <- as.data.frame(cbind(spp.predhumdist.cn.mean, lower.spp.predhumdist.cn, upper.spp.predhumdist.cn))
+head(full.spp.predhumdist.cn)
+names(full.spp.predhumdist.cn) <- c("Aardwolf", "Bat-eared fox", "Caracal", "Cheetah","Genet","Spotted hyena", "Striped hyena",
+                                                 "Jackal","Leopard", "Lion","Serval",  "Zorilla",
+                                                 "LCI_Aardwolf", "LCI_Bat-eared fox", "LCI_Caracal", "LCI_Cheetah","LCI_Genet",
+                                                 "LCI_Spotted hyena","LCI_Striped hyena", "LCI_Jackal","LCI_Leopard", "LCI_Lion", "LCI_Serval",
+                                                 "LCI_Zorilla","UCI_Aardwolf", "UCI_Bat-eared fox", "UCI_Caracal", "UCI_Cheetah","UCI_Genet",
+                                                 "UCI_Spotted hyena","UCI_Striped hyena", "UCI_Jackal","UCI_Leopard", "UCI_Lion", "UCI_Serval",
+                                                 "UCI_Zorilla")
+
+
+str(full.spp.predhumdist.cn)
+
+library(reshape2)
+tmp_cn <- melt(full.spp.predhumdist.cn) # will stack all columns and create a new col with variable name
+tail(tmp_cn,101)  #checking
+tmp_cn[995:1005,]#checking
+mean <- tmp_cn[1:1200 ,]
+LCI <- tmp_cn[1201:2400,]
+UCI <- tmp_cn[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.humdist.cn.pred <- cbind(mean,LCI,UCI)
+head(new.spp.humdist.cn.pred)
+names(new.spp.humdist.cn.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.humcn <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.humcn <- rbind(real.humcn, real.humcn, real.humcn,
+                        real.humcn, real.humcn, real.humcn,
+                        real.humcn, real.humcn, real.humcn,
+                        real.humcn, real.humcn, real.humcn) # stacking it 23 times, once per coeff predicted
+names(real.humcn) <- "HumCN"
+new.spp.humdist.cn.pred$HumDist <- unlist(real.humcn)
+head(new.spp.humdist.cn.pred)
+new.spp.humdist.cn.pred$overlap0<-NA
+new.spp.humdist.cn.pred$overlap0<-if_else(new.spp.humdist.cn.pred$Species=="hyena_spotted"|new.spp.humdist.cn.pred$Species=="serval", 'NO','YES')
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+ggplot(new.spp.humdist.cn.pred, aes(x=HumDist, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Distance from humans")
+
+####SIGNIFICANT SPECIES####
+# predicting effect of agric for spp in which CRI doesn't overlap 0 #
+# first, finding spp
+overlapzero_spp <- overlapzero[4:165,]
+overlapzero_spp <- overlapzero[4:165,]
+
+# predicting
+pred.humdist<- seq(from = min(humdist), to = max(humdist),length.out=100) # scaled values of prop Agric to plug into the prediction formula
+str(tmp <- (outG_Kenya_rodupdate$sims.list))
+nsamp <- length (tmp[[1]]) # number of MCM samplings
+spp.predhumdist <- array(NA,dim=c(100, nsamp, 7)) #3rd dimension is for the spp coeefs, only ones not overlapping 0
+str(spp.predhumdist)
+for(i in 1:nsamp){
+  spp.predhumdist[,i,1] <- plogis(tmp$alpha0[i,12] + tmp$alphaHum[i,12] * pred.humdist) # interaction between Agric and BZ for spp 1
+  spp.predhumdist[,i,2] <- plogis(tmp$alpha0[i,16] + tmp$alphaHum[i,16] * pred.humdist)
+  spp.predhumdist[,i,3] <- plogis(tmp$alpha0[i,21] + tmp$alphaHum[i,21] * pred.humdist)
+  spp.predhumdist[,i,4] <- plogis(tmp$alpha0[i,30] + tmp$alphaHum[i,30] * pred.humdist)
+  spp.predhumdist[,i,5] <- plogis(tmp$alpha0[i,33] + tmp$alphaHum[i,33] * pred.humdist)
+  spp.predhumdist[,i,6] <- plogis(tmp$alpha0[i,36] + tmp$alphaHum[i,36] * pred.humdist)
+  spp.predhumdist[,i,7] <- plogis(tmp$alpha0[i,39] + tmp$alphaHum[i,39] * pred.humdist) # agric and NP fo spp 2 
+}
+
+dimnames(spp.predhumdist)[[3]] <- c("Elephant", "Giraffe", "Spotted hyena", "Oribi",
+                                    "Serval", "Warthog",
+                                    "Zebra")
+spp.predhumdist.mean <- apply(spp.predhumdist, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predhumdist <- apply(spp.predhumdist, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predhumdist <- cri.spp.predhumdist[1,,] # just spliting array into DF
+upper.spp.predhumdist <- cri.spp.predhumdist[2,,] # ditto
+full.spp.predhumdist <- as.data.frame(cbind(spp.predhumdist.mean, lower.spp.predhumdist, upper.spp.predhumdist))
+head(full.spp.predhumdist)
+names(full.spp.predhumdist) <- c("Elephant", "Giraffe", "Spotted hyena", "Oribi",
+                                 "Serval", "Warthog",
+                                 "Zebra",
+                                 "LCI_Elephant", "LCI_Giraffe", "LCI_Spotted hyena", "LCI_Oribi",  
+                                 "LCI_Serval", "LCI_Warthog","LCI_Zebra","UCI_Elephant", "UCI_Giraffe", "UCI_Spotted hyena", "UCI_Oribi",  
+                                 "UCI_Serval", "UCI_Warthog",
+                                 "UCI_Zebra")
+
+library(reshape2)
+tmp3 <- melt(full.spp.predhumdist) # will stack all collumns and create a new col with variable name
+tail(tmp3,20)  #checking
+tmp3[995:1005,]#checking
+mean <- tmp3[1:700 ,]
+LCI <- tmp3[701:1400,]
+UCI <- tmp3[1401:2100,]
+tail(UCI)
+
+new.spp.human.pred <- cbind(mean,LCI,UCI)
+head(new.spp.human.pred)
+names(new.spp.human.pred) <- c("Species","mean","LowerVar","LCI", "UpperVar","UCI")
+
+
+library(dplyr)
+library(tidyr)
+
+range(covs_ordered_updated_test$humdist_short)
+
+real.humdist.2<- as.data.frame(seq(from = 94.89728, to = 6600.55776,length.out=100)) 
+real.humdist.2 <- rbind(real.humdist.2, real.humdist.2, real.humdist.2,
+                        real.humdist.2,real.humdist.2, real.humdist.2,
+                        real.humdist.2) # stacking it 7 times, once per coeff predicted
+names(real.humdist.2) <- "humDist"
+
+new.spp.human.pred$humDist <- unlist(real.humdist.2)
+head(new.spp.human.pred)
+names(new.spp.human.pred) <- c("Species","mean","LowerVar","LCI", "UpperVar","UCI","humDist")
+
+ggplot(new.spp.human.pred, aes(x=humDist, y=mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Distance from humans")
+
+ggplot(new.spp.human.pred, aes(x=humDist, y=mean))+
+  facet_wrap(~Species, scales="free_y", nrow=2) +
+  theme_bw()+ # white background (as opposed to the default grey)
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_ribbon(aes(ymin=LCI, ymax=UCI),alpha=0.2)+
+  geom_line(aes(colour="black", linetype="solid"), size=1) + 
+  scale_fill_manual(values=c("#1b9e77","#d95f02", "#7570b3"))+
+  scale_colour_manual(values=c("#1b9e77","#d95f02", "#7570b3"))+
+  scale_linetype_manual(values=c("dotdash","solid", "longdash"))+
+  scale_size_manual(values=c(1, 5))+
+  coord_cartesian(ylim = c(0, 1))+
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Distance from human infrastructure (m)")
+
+####CARNIVORES-HUMAN####
+# predicting spp responses
+spp.predhumdist.cn<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predhumdist.cn)
+for(i in 1:nsamp){
+  spp.predhumdist.cn[,i,1] <- plogis(tmp$alpha0[i,2] + tmp$alphaHum[i,2] * pred.humdist) # interaction between Agric and BZ for spp 1
+  spp.predhumdist.cn[,i,2] <- plogis(tmp$alpha0[i,4] + tmp$alphaHum[i,4] * pred.humdist)
+  spp.predhumdist.cn[,i,3] <- plogis(tmp$alpha0[i,8] + tmp$alphaHum[i,8] * pred.humdist)
+  spp.predhumdist.cn[,i,4] <- plogis(tmp$alpha0[i,9] + tmp$alphaHum[i,9] * pred.humdist)
+  spp.predhumdist.cn[,i,5] <- plogis(tmp$alpha0[i,15] + tmp$alphaHum[i,15] * pred.humdist)
+  spp.predhumdist.cn[,i,6] <- plogis(tmp$alpha0[i,22] + tmp$alphaHum[i,22] * pred.humdist) 
+  spp.predhumdist.cn[,i,7] <- plogis(tmp$alpha0[i,23] + tmp$alphaHum[i,23] * pred.humdist)
+  spp.predhumdist.cn[,i,8] <- plogis(tmp$alpha0[i,25] + tmp$alphaHum[i,25] * pred.humdist)
+  spp.predhumdist.cn[,i,9] <- plogis(tmp$alpha0[i,26] + tmp$alphaHum[i,26] * pred.humdist)
+  spp.predhumdist.cn[,i,10] <- plogis(tmp$alpha0[i,27] + tmp$alphaHum[i,27] * pred.humdist)
+  spp.predhumdist.cn[,i,11] <- plogis(tmp$alpha0[i,34] + tmp$alphaHum[i,34] * pred.humdist)
+  spp.predhumdist.cn[,i,12] <- plogis(tmp$alpha0[i,42] + tmp$alphaHum[i,42] * pred.humdist)
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predhumdist.cn.mean <- apply(spp.predhumdist.cn, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predhumdist.cn <- apply(spp.predhumdist.cn, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predhumdist.cn <- cri.spp.predhumdist.cn[1,,] # just spliting array into DF
+upper.spp.predhumdist.cn <- cri.spp.predhumdist.cn[2,,] # ditto
+full.spp.predhumdist.cn <- as.data.frame(cbind(spp.predhumdist.cn.mean, lower.spp.predhumdist.cn, upper.spp.predhumdist.cn))
+head(full.spp.predhumdist.cn)
+names(full.spp.predhumdist.cn) <- c("Aardwolf", "Bat-eared fox", "Caracal", "Cheetah","Genet","Spotted hyena", "Striped hyena",
+                                    "Jackal","Leopard", "Lion","Serval",  "Zorilla",
+                                    "LCI_Aardwolf", "LCI_Bat-eared fox", "LCI_Caracal", "LCI_Cheetah","LCI_Genet",
+                                    "LCI_Spotted hyena","LCI_Striped hyena", "LCI_Jackal","LCI_Leopard", "LCI_Lion", "LCI_Serval",
+                                    "LCI_Zorilla","UCI_Aardwolf", "UCI_Bat-eared fox", "UCI_Caracal", "UCI_Cheetah","UCI_Genet",
+                                    "UCI_Spotted hyena","UCI_Striped hyena", "UCI_Jackal","UCI_Leopard", "UCI_Lion", "UCI_Serval",
+                                    "UCI_Zorilla")
+
+
+str(full.spp.predhumdist.cn)
+
+library(reshape2)
+tmp_cn <- melt(full.spp.predhumdist.cn) # will stack all columns and create a new col with variable name
+tail(tmp_cn,101)  #checking
+tmp_cn[995:1005,]#checking
+mean <- tmp_cn[1:1200 ,]
+LCI <- tmp_cn[1201:2400,]
+UCI <- tmp_cn[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.humdist.cn.pred <- cbind(mean,LCI,UCI)
+head(new.spp.humdist.cn.pred)
+names(new.spp.humdist.cn.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.humcn <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.humcn <- rbind(real.humcn, real.humcn, real.humcn,
+                    real.humcn, real.humcn, real.humcn,
+                    real.humcn, real.humcn, real.humcn,
+                    real.humcn, real.humcn, real.humcn) # stacking it 23 times, once per coeff predicted
+names(real.humcn) <- "HumCN"
+new.spp.humdist.cn.pred$HumDist <- unlist(real.humcn)
+head(new.spp.humdist.cn.pred)
+new.spp.humdist.cn.pred$overlap0<-NA
+new.spp.humdist.cn.pred$overlap0<-if_else(new.spp.humdist.cn.pred$Species=="hyena_spotted"|new.spp.humdist.cn.pred$Species=="serval", 'NO','YES')
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+cnhumplot<-ggplot(new.spp.humdist.cn.pred, aes(x=HumDist, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Distance from humans")
+
+####GRAZERS- HUMAN####
+
+# predicting spp responses
+spp.predhumdist.graze<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predhumdist.graze)
+for(i in 1:nsamp){
+  spp.predhumdist.graze[,i,1] <- plogis(tmp$alpha0[i,5] + tmp$alphaHum[i,5] * pred.humdist) # buffalo
+  spp.predhumdist.graze[,i,2] <- plogis(tmp$alpha0[i,11] + tmp$alphaHum[i,11] * pred.humdist) #eland
+  spp.predhumdist.graze[,i,3] <- plogis(tmp$alpha0[i,13] + tmp$alphaHum[i,13] * pred.humdist) #grants
+  spp.predhumdist.graze[,i,4] <- plogis(tmp$alpha0[i,14] + tmp$alphaHum[i,14] * pred.humdist) #thomsons
+  spp.predhumdist.graze[,i,5] <- plogis(tmp$alpha0[i,19] + tmp$alphaHum[i,19] * pred.humdist) #hartebeest
+  spp.predhumdist.graze[,i,6] <- plogis(tmp$alpha0[i,20] + tmp$alphaHum[i,20] * pred.humdist) #hippo
+  spp.predhumdist.graze[,i,7] <- plogis(tmp$alpha0[i,33] + tmp$alphaHum[i,33] * pred.humdist) #reedbuck
+  spp.predhumdist.graze[,i,8] <- plogis(tmp$alpha0[i,36] + tmp$alphaHum[i,36] * pred.humdist) #topi
+  spp.predhumdist.graze[,i,9] <- plogis(tmp$alpha0[i,39] + tmp$alphaHum[i,39] * pred.humdist) #waterbuck
+  spp.predhumdist.graze[,i,10] <- plogis(tmp$alpha0[i,38] + tmp$alphaHum[i,38] * pred.humdist) #warthog
+  spp.predhumdist.graze[,i,11] <- plogis(tmp$alpha0[i,40] + tmp$alphaHum[i,40] * pred.humdist)#wildebeest
+  spp.predhumdist.graze[,i,12] <- plogis(tmp$alpha0[i,41] + tmp$alphaHum[i,41] * pred.humdist)#zebra
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predhumdist.graze.mean <- apply(spp.predhumdist.graze, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predhumdist.graze <- apply(spp.predhumdist.graze, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predhumdist.graze <- cri.spp.predhumdist.graze[1,,] # just spliting array into DF
+upper.spp.predhumdist.graze <- cri.spp.predhumdist.graze[2,,] # ditto
+full.spp.predhumdist.graze <- as.data.frame(cbind(spp.predhumdist.graze.mean, lower.spp.predhumdist.graze, upper.spp.predhumdist.graze))
+head(full.spp.predhumdist.graze)
+names(full.spp.predhumdist.graze) <- c("Buffalo", "Eland", "Grant's gazelle", "Thomson's gazelle","Coke's hartebeest", "Hippopotamus", "Reedbuck", "Topi", "Waterbuck", "Warthog", "Wildebeest", "Zebra",
+                                       "LCI_Buffalo", "LCI_Eland", "LCI_Grant's gazelle", "LCI_Thomson's gazelle","LCI_Coke's hartebeest", "LCI_Hippopotamus", "LCI_Reedbuck", "LCI_Topi", "LCI_Waterbuck", "LCI_Warthog", "LCI_Wildebeest", "LCI_Zebra",
+                                       "UCI_Buffalo", "UCI_Eland", "UCI_Grant's gazelle", "UCI_Thomson's gazelle","UCI_Coke's hartebeest", "UCI_Hippopotamus", "UCI_Reedbuck", "UCI_Topi", "UCI_Waterbuck", "UCI_Warthog",  "UCI_Wildebeest","UCI_Zebra")
+
+
+str(full.spp.predhumdist.graze)
+
+library(reshape2)
+tmp_graze <- melt(full.spp.predhumdist.graze) # will stack all columns and create a new col with variable name
+tail(tmp_graze,101)  #checking
+tmp_graze[995:1005,]#checking
+mean <- tmp_graze[1:1200 ,]
+LCI <- tmp_graze[1201:2400,]
+UCI <- tmp_graze[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.humdist.graze.pred <- cbind(mean,LCI,UCI)
+head(new.spp.humdist.graze.pred)
+names(new.spp.humdist.graze.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.humgraze <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.humgraze <- rbind(real.humgraze, real.humgraze, real.humgraze,
+                    real.humgraze, real.humgraze, real.humgraze,
+                    real.humgraze, real.humgraze, real.humgraze,
+                    real.humgraze,  real.humgraze,real.humgraze
+                    ) # stacking it 12 times, once per coeff predicted
+names(real.humgraze) <- "Humgraze"
+new.spp.humdist.graze.pred$HumDist <- unlist(real.humgraze)
+head(new.spp.humdist.graze.pred)
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+grazehumplot<-ggplot(new.spp.humdist.graze.pred, aes(x=HumDist, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Distance from humans")
+
+
+####BROWSERS- HUMAN####
+
+# predicting spp responses
+spp.predhumdist.browse<- array(NA,dim=c(100, nsamp, 6)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predhumdist.browse)
+for(i in 1:nsamp){
+  spp.predhumdist.browse[,i,1] <- plogis(tmp$alpha0[i,5] + tmp$alphaHum[i,5] * pred.humdist) # bushbuck
+  spp.predhumdist.browse[,i,2] <- plogis(tmp$alpha0[i,10] + tmp$alphaHum[i,10] * pred.humdist) #dikdik
+  spp.predhumdist.browse[,i,3] <- plogis(tmp$alpha0[i,12] + tmp$alphaHum[i,12] * pred.humdist) #elephant
+  spp.predhumdist.browse[,i,4] <- plogis(tmp$alpha0[i,17] + tmp$alphaHum[i,17] * pred.humdist) #giraffe
+  spp.predhumdist.browse[,i,5] <- plogis(tmp$alpha0[i,24] + tmp$alphaHum[i,24] * pred.humdist) #impala
+  spp.predhumdist.browse[,i,6] <- plogis(tmp$alpha0[i,31] + tmp$alphaHum[i,31] * pred.humdist) #oribi
+ }
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predhumdist.browse.mean <- apply(spp.predhumdist.browse, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predhumdist.browse <- apply(spp.predhumdist.browse, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predhumdist.browse <- cri.spp.predhumdist.browse[1,,] # just spliting array into DF
+upper.spp.predhumdist.browse <- cri.spp.predhumdist.browse[2,,] # ditto
+full.spp.predhumdist.browse <- as.data.frame(cbind(spp.predhumdist.browse.mean, lower.spp.predhumdist.browse, upper.spp.predhumdist.browse))
+head(full.spp.predhumdist.browse)
+names(full.spp.predhumdist.browse) <- c("Bushbuck", "Dikdik", "Elephant", "Giraffe", "Impala", "Oribi", "LCI_Bushbuck", "LCI_Dikdik", "LCI_Elephant", "LCI_Giraffe", "LCI_Impala", "LCI_Oribi", "UCI_Bushbuck", "UCI_Dikdik", "UCI_Elephant", "UCI_Giraffe", "UCI_Impala", "UCI_Oribi")
+
+
+str(full.spp.predhumdist.browse)
+
+library(reshape2)
+tmp_browse <- melt(full.spp.predhumdist.browse) # will stack all columns and create a new col with variable name
+tail(tmp_browse,101)  #checking
+tmp_browse[995:1005,]#checking
+mean <- tmp_browse[1:600 ,]
+LCI <- tmp_browse[601:1200,]
+UCI <- tmp_browse[1201:1800,]
+tail(UCI)
+head(mean)
+
+new.spp.humdist.browse.pred <- cbind(mean,LCI,UCI)
+head(new.spp.humdist.browse.pred)
+names(new.spp.humdist.browse.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.humbrowse <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.humbrowse <- rbind(real.humbrowse, real.humbrowse, real.humbrowse,
+                       real.humbrowse, real.humbrowse, real.humbrowse
+                       ) # stacking it 11 times, once per coeff predicted
+names(real.humbrowse) <- "Humbrowse"
+new.spp.humdist.browse.pred$HumDist <- unlist(real.humbrowse)
+head(new.spp.humdist.browse.pred)
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+browsehumplot<-ggplot(new.spp.humdist.browse.pred, aes(x=HumDist, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Distance from humans")
+
+
+####OMNIVORESS- HUMAN####
+
+# predicting spp responses
+spp.predhumdist.omni<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predhumdist.omni)
+for(i in 1:nsamp){
+  spp.predhumdist.omni[,i,1] <- plogis(tmp$alpha0[i,1] + tmp$alphaHum[i,1] * pred.humdist) # aardvark
+  spp.predhumdist.omni[,i,2] <- plogis(tmp$alpha0[i,3] + tmp$alphaHum[i,3] * pred.humdist) #baboon
+  spp.predhumdist.omni[,i,3] <- plogis(tmp$alpha0[i,6] + tmp$alphaHum[i,6] * pred.humdist) #bushbaby
+  spp.predhumdist.omni[,i,4] <- plogis(tmp$alpha0[i,16] + tmp$alphaHum[i,16] * pred.humdist) #gerbil
+  spp.predhumdist.omni[,i,5] <- plogis(tmp$alpha0[i,18] + tmp$alphaHum[i,18] * pred.humdist) #hare
+  spp.predhumdist.omni[,i,6] <- plogis(tmp$alpha0[i,21] + tmp$alphaHum[i,21] * pred.humdist) #honey badger
+  spp.predhumdist.omni[,i,7] <- plogis(tmp$alpha0[i,28] + tmp$alphaHum[i,28] * pred.humdist) #banded
+  spp.predhumdist.omni[,i,8] <- plogis(tmp$alpha0[i,29] + tmp$alphaHum[i,29] * pred.humdist) #other
+  spp.predhumdist.omni[,i,9] <- plogis(tmp$alpha0[i,30] + tmp$alphaHum[i,30] * pred.humdist) #white tailed
+  spp.predhumdist.omni[,i,10] <- plogis(tmp$alpha0[i,32] + tmp$alphaHum[i,32] * pred.humdist) #porcupine
+  spp.predhumdist.omni[,i,11] <- plogis(tmp$alpha0[i,35] + tmp$alphaHum[i,35] * pred.humdist) #springhare
+  spp.predhumdist.omni[,i,12] <- plogis(tmp$alpha0[i,37] + tmp$alphaHum[i,37] * pred.humdist) #vervet
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predhumdist.omni.mean <- apply(spp.predhumdist.omni, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predhumdist.omni <- apply(spp.predhumdist.omni, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predhumdist.omni <- cri.spp.predhumdist.omni[1,,] # just spliting array into DF
+upper.spp.predhumdist.omni <- cri.spp.predhumdist.omni[2,,] # ditto
+full.spp.predhumdist.omni <- as.data.frame(cbind(spp.predhumdist.omni.mean, lower.spp.predhumdist.omni, upper.spp.predhumdist.omni))
+head(full.spp.predhumdist.omni)
+names(full.spp.predhumdist.omni) <- c("Aardvark", "Baboon", "Bushbaby", "Gerbil", "Hare", "Honey badger", "Banded mongoose", "Other mongoose", "White-tailed mongoose", "Porcupine", "Springhare", "Vervet monkey",
+                                      "LCI_Aardvark", "LCI_Baboon", "LCI_Bushbaby", "LCI_Gerbil", "LCI_Hare", "LCI_Honey badger", "LCI_Banded mongoose", "LCI_Other mongoose", "LCI_White-tailed mongoose", "LCI_Porcupine", "LCI_Springhare", "LCI_Vervet monkey", 
+                                      "UCI_Aardvark", "UCI_Baboon", "UCI_Bushbaby", "UCI_Gerbil", "UCI_Hare", "UCI_Honey badger", "UCI_Banded mongoose", "UCI_Other mongoose", "UCI_White-tailed mongoose", "UCI_Porcupine", "UCI_Springhare", "UCI_Vervet monkey")
+str(full.spp.predhumdist.omni)
+
+library(reshape2)
+tmp_omni <- melt(full.spp.predhumdist.omni) # will stack all columns and create a new col with variable name
+tail(tmp_omni,101)  #checking
+tmp_omni[995:1005,]#checking
+mean <- tmp_omni[1:1200 ,]
+LCI <- tmp_omni[1201:2400,]
+UCI <- tmp_omni[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.humdist.omni.pred <- cbind(mean,LCI,UCI)
+head(new.spp.humdist.omni.pred)
+names(new.spp.humdist.omni.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.humomni <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.humomni <- rbind(real.humomni, real.humomni, real.humomni,
+                        real.humomni, real.humomni, real.humomni, real.humomni, real.humomni, real.humomni,
+                      real.humomni, real.humomni, real.humomni)
+) # stacking it 11 times, once per coeff predicted
+names(real.humomni) <- "Humomni"
+new.spp.humdist.omni.pred$HumDist <- unlist(real.humomni)
+head(new.spp.humdist.omni.pred)
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+omnihumplot<-ggplot(new.spp.humdist.omni.pred, aes(x=HumDist, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Distance from humans")
+
+
+####CARNIVORES-Cattle####
+pred.Cattle<- seq(from = min(cattle_rate), to = max(cattle_rate),length.out=100)
+# predicting spp responses
+spp.predCattle.cn<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predCattle.cn)
+for(i in 1:nsamp){
+  spp.predCattle.cn[,i,1] <- plogis(tmp$alpha0[i,2] + tmp$alphaCattle[i,2] * pred.Cattle) # interaction between Agric and BZ for spp 1
+  spp.predCattle.cn[,i,2] <- plogis(tmp$alpha0[i,4] + tmp$alphaCattle[i,4] * pred.Cattle)
+  spp.predCattle.cn[,i,3] <- plogis(tmp$alpha0[i,8] + tmp$alphaCattle[i,8] * pred.Cattle)
+  spp.predCattle.cn[,i,4] <- plogis(tmp$alpha0[i,9] + tmp$alphaCattle[i,9] * pred.Cattle)
+  spp.predCattle.cn[,i,5] <- plogis(tmp$alpha0[i,15] + tmp$alphaCattle[i,15] * pred.Cattle)
+  spp.predCattle.cn[,i,6] <- plogis(tmp$alpha0[i,22] + tmp$alphaCattle[i,22] * pred.Cattle) 
+  spp.predCattle.cn[,i,7] <- plogis(tmp$alpha0[i,23] + tmp$alphaCattle[i,23] * pred.Cattle)
+  spp.predCattle.cn[,i,8] <- plogis(tmp$alpha0[i,25] + tmp$alphaCattle[i,25] * pred.Cattle)
+  spp.predCattle.cn[,i,9] <- plogis(tmp$alpha0[i,26] + tmp$alphaCattle[i,26] * pred.Cattle)
+  spp.predCattle.cn[,i,10] <- plogis(tmp$alpha0[i,27] + tmp$alphaCattle[i,27] * pred.Cattle)
+  spp.predCattle.cn[,i,11] <- plogis(tmp$alpha0[i,34] + tmp$alphaCattle[i,34] * pred.Cattle)
+  spp.predCattle.cn[,i,12] <- plogis(tmp$alpha0[i,42] + tmp$alphaCattle[i,42] * pred.Cattle)
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predCattle.cn.mean <- apply(spp.predCattle.cn, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predCattle.cn <- apply(spp.predCattle.cn, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predCattle.cn <- cri.spp.predCattle.cn[1,,] # just spliting array into DF
+upper.spp.predCattle.cn <- cri.spp.predCattle.cn[2,,] # ditto
+full.spp.predCattle.cn <- as.data.frame(cbind(spp.predCattle.cn.mean, lower.spp.predCattle.cn, upper.spp.predCattle.cn))
+head(full.spp.predCattle.cn)
+names(full.spp.predCattle.cn) <- c("Aardwolf", "Bat-eared fox", "Caracal", "Cheetah","Genet","Spotted hyena", "Striped hyena",
+                                    "Jackal","Leopard", "Lion","Serval",  "Zorilla",
+                                    "LCI_Aardwolf", "LCI_Bat-eared fox", "LCI_Caracal", "LCI_Cheetah","LCI_Genet",
+                                    "LCI_Spotted hyena","LCI_Striped hyena", "LCI_Jackal","LCI_Leopard", "LCI_Lion", "LCI_Serval",
+                                    "LCI_Zorilla","UCI_Aardwolf", "UCI_Bat-eared fox", "UCI_Caracal", "UCI_Cheetah","UCI_Genet",
+                                    "UCI_Spotted hyena","UCI_Striped hyena", "UCI_Jackal","UCI_Leopard", "UCI_Lion", "UCI_Serval",
+                                    "UCI_Zorilla")
+
+
+str(full.spp.predCattle.cn)
+
+library(reshape2)
+tmp_cn <- melt(full.spp.predCattle.cn) # will stack all columns and create a new col with variable name
+tail(tmp_cn,101)  #checking
+tmp_cn[995:1005,]#checking
+mean <- tmp_cn[1:1200 ,]
+LCI <- tmp_cn[1201:2400,]
+UCI <- tmp_cn[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.Cattle.cn.pred <- cbind(mean,LCI,UCI)
+head(new.spp.Cattle.cn.pred)
+names(new.spp.Cattle.cn.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.Cattlecn <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.Cattlecn <- rbind(real.Cattlecn, real.Cattlecn, real.Cattlecn,
+                    real.Cattlecn, real.Cattlecn, real.Cattlecn,
+                    real.Cattlecn, real.Cattlecn, real.Cattlecn,
+                    real.Cattlecn, real.Cattlecn, real.Cattlecn) # stacking it 23 times, once per coeff predicted
+names(real.Cattlecn) <- "CattleCN"
+new.spp.Cattle.cn.pred$Cattle <- unlist(real.Cattlecn)
+head(new.spp.Cattle.cn.pred)
+new.spp.Cattle.cn.pred$overlap0<-NA
+new.spp.Cattle.cn.pred$overlap0<-if_else(new.spp.Cattle.cn.pred$Species=="hyena_spotted"|new.spp.Cattle.cn.pred$Species=="serval", 'NO','YES')
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+cattlecnplot<-ggplot(new.spp.Cattle.cn.pred, aes(x=Cattle, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Cattle trap rate")
+
+####GRAZERS- Cattle####
+
+# predicting spp responses
+spp.predCattle.graze<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predCattle.graze)
+for(i in 1:nsamp){
+  spp.predCattle.graze[,i,1] <- plogis(tmp$alpha0[i,5] + tmp$alphaCattle[i,5] * pred.Cattle) # buffalo
+  spp.predCattle.graze[,i,2] <- plogis(tmp$alpha0[i,11] + tmp$alphaCattle[i,11] * pred.Cattle) #eland
+  spp.predCattle.graze[,i,3] <- plogis(tmp$alpha0[i,13] + tmp$alphaCattle[i,13] * pred.Cattle) #grants
+  spp.predCattle.graze[,i,4] <- plogis(tmp$alpha0[i,14] + tmp$alphaCattle[i,14] * pred.Cattle) #thomsons
+  spp.predCattle.graze[,i,5] <- plogis(tmp$alpha0[i,19] + tmp$alphaCattle[i,19] * pred.Cattle) #hartebeest
+  spp.predCattle.graze[,i,6] <- plogis(tmp$alpha0[i,20] + tmp$alphaCattle[i,20] * pred.Cattle) #hippo
+  spp.predCattle.graze[,i,7] <- plogis(tmp$alpha0[i,33] + tmp$alphaCattle[i,33] * pred.Cattle) #reedbuck
+  spp.predCattle.graze[,i,8] <- plogis(tmp$alpha0[i,36] + tmp$alphaCattle[i,36] * pred.Cattle) #topi
+  spp.predCattle.graze[,i,9] <- plogis(tmp$alpha0[i,39] + tmp$alphaCattle[i,39] * pred.Cattle) #waterbuck
+  spp.predCattle.graze[,i,10] <- plogis(tmp$alpha0[i,38] + tmp$alphaCattle[i,38] * pred.Cattle) #warthog
+  spp.predCattle.graze[,i,11] <- plogis(tmp$alpha0[i,40] + tmp$alphaCattle[i,40] * pred.Cattle)#wildebeest
+  spp.predCattle.graze[,i,12] <- plogis(tmp$alpha0[i,41] + tmp$alphaCattle[i,41] * pred.Cattle)#zebra
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predCattle.graze.mean <- apply(spp.predCattle.graze, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predCattle.graze <- apply(spp.predCattle.graze, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predCattle.graze <- cri.spp.predCattle.graze[1,,] # just spliting array into DF
+upper.spp.predCattle.graze <- cri.spp.predCattle.graze[2,,] # ditto
+full.spp.predCattle.graze <- as.data.frame(cbind(spp.predCattle.graze.mean, lower.spp.predCattle.graze, upper.spp.predCattle.graze))
+head(full.spp.predCattle.graze)
+names(full.spp.predCattle.graze) <- c("Buffalo", "Eland", "Grant's gazelle", "Thomson's gazelle","Coke's hartebeest", "Hippopotamus", "Reedbuck", "Topi", "Waterbuck", "Warthog", "Wildebeest", "Zebra",
+                                       "LCI_Buffalo", "LCI_Eland", "LCI_Grant's gazelle", "LCI_Thomson's gazelle","LCI_Coke's hartebeest", "LCI_Hippopotamus", "LCI_Reedbuck", "LCI_Topi", "LCI_Waterbuck", "LCI_Warthog", "LCI_Wildebeest", "LCI_Zebra",
+                                       "UCI_Buffalo", "UCI_Eland", "UCI_Grant's gazelle", "UCI_Thomson's gazelle","UCI_Coke's hartebeest", "UCI_Hippopotamus", "UCI_Reedbuck", "UCI_Topi", "UCI_Waterbuck", "UCI_Warthog",  "UCI_Wildebeest","UCI_Zebra")
+
+
+str(full.spp.predCattle.graze)
+
+library(reshape2)
+tmp_graze <- melt(full.spp.predCattle.graze) # will stack all columns and create a new col with variable name
+tail(tmp_graze,101)  #checking
+tmp_graze[995:1005,]#checking
+mean <- tmp_graze[1:1200 ,]
+LCI <- tmp_graze[1201:2400,]
+UCI <- tmp_graze[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.Cattle.graze.pred <- cbind(mean,LCI,UCI)
+head(new.spp.Cattle.graze.pred)
+names(new.spp.Cattle.graze.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.Cattlegraze <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.Cattlegraze <- rbind(real.Cattlegraze, real.Cattlegraze, real.Cattlegraze,
+                       real.Cattlegraze, real.Cattlegraze, real.Cattlegraze,
+                       real.Cattlegraze, real.Cattlegraze, real.Cattlegraze,
+                       real.Cattlegraze,  real.Cattlegraze,real.Cattlegraze
+) # stacking it 12 times, once per coeff predicted
+names(real.Cattlegraze) <- "Cattlegraze"
+new.spp.Cattle.graze.pred$Cattle <- unlist(real.Cattlegraze)
+head(new.spp.Cattle.graze.pred)
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+grazeCattleplot<-ggplot(new.spp.Cattle.graze.pred, aes(x=Cattle, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Cattle trap rate")
+
+
+####BROWSERS- Cattle####
+
+# predicting spp responses
+spp.predCattle.browse<- array(NA,dim=c(100, nsamp, 6)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predCattle.browse)
+for(i in 1:nsamp){
+  spp.predCattle.browse[,i,1] <- plogis(tmp$alpha0[i,5] + tmp$alphaCattle[i,5] * pred.Cattle) # bushbuck
+  spp.predCattle.browse[,i,2] <- plogis(tmp$alpha0[i,10] + tmp$alphaCattle[i,10] * pred.Cattle) #dikdik
+  spp.predCattle.browse[,i,3] <- plogis(tmp$alpha0[i,12] + tmp$alphaCattle[i,12] * pred.Cattle) #elephant
+  spp.predCattle.browse[,i,4] <- plogis(tmp$alpha0[i,17] + tmp$alphaCattle[i,17] * pred.Cattle) #giraffe
+  spp.predCattle.browse[,i,5] <- plogis(tmp$alpha0[i,24] + tmp$alphaCattle[i,24] * pred.Cattle) #impala
+  spp.predCattle.browse[,i,6] <- plogis(tmp$alpha0[i,31] + tmp$alphaCattle[i,31] * pred.Cattle) #oribi
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predCattle.browse.mean <- apply(spp.predCattle.browse, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predCattle.browse <- apply(spp.predCattle.browse, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predCattle.browse <- cri.spp.predCattle.browse[1,,] # just spliting array into DF
+upper.spp.predCattle.browse <- cri.spp.predCattle.browse[2,,] # ditto
+full.spp.predCattle.browse <- as.data.frame(cbind(spp.predCattle.browse.mean, lower.spp.predCattle.browse, upper.spp.predCattle.browse))
+head(full.spp.predCattle.browse)
+names(full.spp.predCattle.browse) <- c("Bushbuck", "Dikdik", "Elephant", "Giraffe", "Impala", "Oribi", "LCI_Bushbuck", "LCI_Dikdik", "LCI_Elephant", "LCI_Giraffe", "LCI_Impala", "LCI_Oribi", "UCI_Bushbuck", "UCI_Dikdik", "UCI_Elephant", "UCI_Giraffe", "UCI_Impala", "UCI_Oribi")
+
+
+str(full.spp.predCattle.browse)
+
+library(reshape2)
+tmp_browse <- melt(full.spp.predCattle.browse) # will stack all columns and create a new col with variable name
+tail(tmp_browse,101)  #checking
+tmp_browse[995:1005,]#checking
+mean <- tmp_browse[1:600 ,]
+LCI <- tmp_browse[601:1200,]
+UCI <- tmp_browse[1201:1800,]
+tail(UCI)
+head(mean)
+
+new.spp.Cattle.browse.pred <- cbind(mean,LCI,UCI)
+head(new.spp.Cattle.browse.pred)
+names(new.spp.Cattle.browse.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.Cattlebrowse <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.Cattlebrowse <- rbind(real.Cattlebrowse, real.Cattlebrowse, real.Cattlebrowse,
+                        real.Cattlebrowse, real.Cattlebrowse, real.Cattlebrowse
+) # stacking it 11 times, once per coeff predicted
+names(real.Cattlebrowse) <- "Cattlebrowse"
+new.spp.Cattle.browse.pred$Cattle <- unlist(real.Cattlebrowse)
+head(new.spp.Cattle.browse.pred)
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+browseCattleplot<-ggplot(new.spp.Cattle.browse.pred, aes(x=Cattle, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Cattle trap rate")
+
+
+####OMNIVORESS- Cattle####
+
+# predicting spp responses
+spp.predCattle.omni<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predCattle.omni)
+for(i in 1:nsamp){
+  spp.predCattle.omni[,i,1] <- plogis(tmp$alpha0[i,1] + tmp$alphaCattle[i,1] * pred.Cattle) # aardvark
+  spp.predCattle.omni[,i,2] <- plogis(tmp$alpha0[i,3] + tmp$alphaCattle[i,3] * pred.Cattle) #baboon
+  spp.predCattle.omni[,i,3] <- plogis(tmp$alpha0[i,6] + tmp$alphaCattle[i,6] * pred.Cattle) #bushbaby
+  spp.predCattle.omni[,i,4] <- plogis(tmp$alpha0[i,16] + tmp$alphaCattle[i,16] * pred.Cattle) #gerbil
+  spp.predCattle.omni[,i,5] <- plogis(tmp$alpha0[i,18] + tmp$alphaCattle[i,18] * pred.Cattle) #hare
+  spp.predCattle.omni[,i,6] <- plogis(tmp$alpha0[i,21] + tmp$alphaCattle[i,21] * pred.Cattle) #honey badger
+  spp.predCattle.omni[,i,7] <- plogis(tmp$alpha0[i,28] + tmp$alphaCattle[i,28] * pred.Cattle) #banded
+  spp.predCattle.omni[,i,8] <- plogis(tmp$alpha0[i,29] + tmp$alphaCattle[i,29] * pred.Cattle) #other
+  spp.predCattle.omni[,i,9] <- plogis(tmp$alpha0[i,30] + tmp$alphaCattle[i,30] * pred.Cattle) #white tailed
+  spp.predCattle.omni[,i,10] <- plogis(tmp$alpha0[i,32] + tmp$alphaCattle[i,32] * pred.Cattle) #porcupine
+  spp.predCattle.omni[,i,11] <- plogis(tmp$alpha0[i,35] + tmp$alphaCattle[i,35] * pred.Cattle) #springhare
+  spp.predCattle.omni[,i,12] <- plogis(tmp$alpha0[i,37] + tmp$alphaCattle[i,37] * pred.Cattle) #vervet
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predCattle.omni.mean <- apply(spp.predCattle.omni, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predCattle.omni <- apply(spp.predCattle.omni, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predCattle.omni <- cri.spp.predCattle.omni[1,,] # just spliting array into DF
+upper.spp.predCattle.omni <- cri.spp.predCattle.omni[2,,] # ditto
+full.spp.predCattle.omni <- as.data.frame(cbind(spp.predCattle.omni.mean, lower.spp.predCattle.omni, upper.spp.predCattle.omni))
+head(full.spp.predCattle.omni)
+names(full.spp.predCattle.omni) <- c("Aardvark", "Baboon", "Bushbaby", "Gerbil", "Hare", "Honey badger", "Banded mongoose", "Other mongoose", "White-tailed mongoose", "Porcupine", "Springhare", "Vervet monkey",
+                                      "LCI_Aardvark", "LCI_Baboon", "LCI_Bushbaby", "LCI_Gerbil", "LCI_Hare", "LCI_Honey badger", "LCI_Banded mongoose", "LCI_Other mongoose", "LCI_White-tailed mongoose", "LCI_Porcupine", "LCI_Springhare", "LCI_Vervet monkey", 
+                                      "UCI_Aardvark", "UCI_Baboon", "UCI_Bushbaby", "UCI_Gerbil", "UCI_Hare", "UCI_Honey badger", "UCI_Banded mongoose", "UCI_Other mongoose", "UCI_White-tailed mongoose", "UCI_Porcupine", "UCI_Springhare", "UCI_Vervet monkey")
+str(full.spp.predCattle.omni)
+
+library(reshape2)
+tmp_omni <- melt(full.spp.predCattle.omni) # will stack all columns and create a new col with variable name
+tail(tmp_omni,101)  #checking
+tmp_omni[995:1005,]#checking
+mean <- tmp_omni[1:1200 ,]
+LCI <- tmp_omni[1201:2400,]
+UCI <- tmp_omni[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.Cattle.omni.pred <- cbind(mean,LCI,UCI)
+head(new.spp.Cattle.omni.pred)
+names(new.spp.Cattle.omni.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.Cattleomni <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.Cattleomni <- rbind(real.Cattleomni, real.Cattleomni, real.Cattleomni,
+                      real.Cattleomni, real.Cattleomni, real.Cattleomni, real.Cattleomni, real.Cattleomni, real.Cattleomni,
+                      real.Cattleomni, real.Cattleomni, real.Cattleomni)
+ # stacking it 11 times, once per coeff predicted
+names(real.Cattleomni) <- "Cattleomni"
+new.spp.Cattle.omni.pred$Cattle <- unlist(real.Cattleomni)
+head(new.spp.Cattle.omni.pred)
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+omniCattleplot<-ggplot(new.spp.Cattle.omni.pred, aes(x=Cattle, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Cattle trap rate")
+
+####CARNIVORES-Shoat####
+pred.Shoat<- seq(from = min(shoat_rate), to = max(shoat_rate),length.out=100)
+# predicting spp responses
+spp.predShoat.cn<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predShoat.cn)
+for(i in 1:nsamp){
+  spp.predShoat.cn[,i,1] <- plogis(tmp$alpha0[i,2] + tmp$alphaShoat[i,2] * pred.Shoat) # interaction between Agric and BZ for spp 1
+  spp.predShoat.cn[,i,2] <- plogis(tmp$alpha0[i,4] + tmp$alphaShoat[i,4] * pred.Shoat)
+  spp.predShoat.cn[,i,3] <- plogis(tmp$alpha0[i,8] + tmp$alphaShoat[i,8] * pred.Shoat)
+  spp.predShoat.cn[,i,4] <- plogis(tmp$alpha0[i,9] + tmp$alphaShoat[i,9] * pred.Shoat)
+  spp.predShoat.cn[,i,5] <- plogis(tmp$alpha0[i,15] + tmp$alphaShoat[i,15] * pred.Shoat)
+  spp.predShoat.cn[,i,6] <- plogis(tmp$alpha0[i,22] + tmp$alphaShoat[i,22] * pred.Shoat) 
+  spp.predShoat.cn[,i,7] <- plogis(tmp$alpha0[i,23] + tmp$alphaShoat[i,23] * pred.Shoat)
+  spp.predShoat.cn[,i,8] <- plogis(tmp$alpha0[i,25] + tmp$alphaShoat[i,25] * pred.Shoat)
+  spp.predShoat.cn[,i,9] <- plogis(tmp$alpha0[i,26] + tmp$alphaShoat[i,26] * pred.Shoat)
+  spp.predShoat.cn[,i,10] <- plogis(tmp$alpha0[i,27] + tmp$alphaShoat[i,27] * pred.Shoat)
+  spp.predShoat.cn[,i,11] <- plogis(tmp$alpha0[i,34] + tmp$alphaShoat[i,34] * pred.Shoat)
+  spp.predShoat.cn[,i,12] <- plogis(tmp$alpha0[i,42] + tmp$alphaShoat[i,42] * pred.Shoat)
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predShoat.cn.mean <- apply(spp.predShoat.cn, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predShoat.cn <- apply(spp.predShoat.cn, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predShoat.cn <- cri.spp.predShoat.cn[1,,] # just spliting array into DF
+upper.spp.predShoat.cn <- cri.spp.predShoat.cn[2,,] # ditto
+full.spp.predShoat.cn <- as.data.frame(cbind(spp.predShoat.cn.mean, lower.spp.predShoat.cn, upper.spp.predShoat.cn))
+head(full.spp.predShoat.cn)
+names(full.spp.predShoat.cn) <- c("Aardwolf", "Bat-eared fox", "Caracal", "Cheetah","Genet","Spotted hyena", "Striped hyena",
+                                   "Jackal","Leopard", "Lion","Serval",  "Zorilla",
+                                   "LCI_Aardwolf", "LCI_Bat-eared fox", "LCI_Caracal", "LCI_Cheetah","LCI_Genet",
+                                   "LCI_Spotted hyena","LCI_Striped hyena", "LCI_Jackal","LCI_Leopard", "LCI_Lion", "LCI_Serval",
+                                   "LCI_Zorilla","UCI_Aardwolf", "UCI_Bat-eared fox", "UCI_Caracal", "UCI_Cheetah","UCI_Genet",
+                                   "UCI_Spotted hyena","UCI_Striped hyena", "UCI_Jackal","UCI_Leopard", "UCI_Lion", "UCI_Serval",
+                                   "UCI_Zorilla")
+
+
+str(full.spp.predShoat.cn)
+
+library(reshape2)
+tmp_cn <- melt(full.spp.predShoat.cn) # will stack all columns and create a new col with variable name
+tail(tmp_cn,101)  #checking
+tmp_cn[995:1005,]#checking
+mean <- tmp_cn[1:1200 ,]
+LCI <- tmp_cn[1201:2400,]
+UCI <- tmp_cn[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.Shoat.cn.pred <- cbind(mean,LCI,UCI)
+head(new.spp.Shoat.cn.pred)
+names(new.spp.Shoat.cn.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.Shoatcn <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.Shoatcn <- rbind(real.Shoatcn, real.Shoatcn, real.Shoatcn,
+                       real.Shoatcn, real.Shoatcn, real.Shoatcn,
+                       real.Shoatcn, real.Shoatcn, real.Shoatcn,
+                       real.Shoatcn, real.Shoatcn, real.Shoatcn) # stacking it 23 times, once per coeff predicted
+names(real.Shoatcn) <- "ShoatCN"
+new.spp.Shoat.cn.pred$Shoat <- unlist(real.Shoatcn)
+head(new.spp.Shoat.cn.pred)
+new.spp.Shoat.cn.pred$overlap0<-NA
+new.spp.Shoat.cn.pred$overlap0<-if_else(new.spp.Shoat.cn.pred$Species=="hyena_spotted"|new.spp.Shoat.cn.pred$Species=="serval", 'NO','YES')
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+Shoatcnplot<-ggplot(new.spp.Shoat.cn.pred, aes(x=Shoat, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Shoat trap rate")
+
+####GRAZERS- Shoat####
+
+# predicting spp responses
+spp.predShoat.graze<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predShoat.graze)
+for(i in 1:nsamp){
+  spp.predShoat.graze[,i,1] <- plogis(tmp$alpha0[i,5] + tmp$alphaShoat[i,5] * pred.Shoat) # buffalo
+  spp.predShoat.graze[,i,2] <- plogis(tmp$alpha0[i,11] + tmp$alphaShoat[i,11] * pred.Shoat) #eland
+  spp.predShoat.graze[,i,3] <- plogis(tmp$alpha0[i,13] + tmp$alphaShoat[i,13] * pred.Shoat) #grants
+  spp.predShoat.graze[,i,4] <- plogis(tmp$alpha0[i,14] + tmp$alphaShoat[i,14] * pred.Shoat) #thomsons
+  spp.predShoat.graze[,i,5] <- plogis(tmp$alpha0[i,19] + tmp$alphaShoat[i,19] * pred.Shoat) #hartebeest
+  spp.predShoat.graze[,i,6] <- plogis(tmp$alpha0[i,20] + tmp$alphaShoat[i,20] * pred.Shoat) #hippo
+  spp.predShoat.graze[,i,7] <- plogis(tmp$alpha0[i,33] + tmp$alphaShoat[i,33] * pred.Shoat) #reedbuck
+  spp.predShoat.graze[,i,8] <- plogis(tmp$alpha0[i,36] + tmp$alphaShoat[i,36] * pred.Shoat) #topi
+  spp.predShoat.graze[,i,9] <- plogis(tmp$alpha0[i,39] + tmp$alphaShoat[i,39] * pred.Shoat) #waterbuck
+  spp.predShoat.graze[,i,10] <- plogis(tmp$alpha0[i,38] + tmp$alphaShoat[i,38] * pred.Shoat) #warthog
+  spp.predShoat.graze[,i,11] <- plogis(tmp$alpha0[i,40] + tmp$alphaShoat[i,40] * pred.Shoat)#wildebeest
+  spp.predShoat.graze[,i,12] <- plogis(tmp$alpha0[i,41] + tmp$alphaShoat[i,41] * pred.Shoat)#zebra
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predShoat.graze.mean <- apply(spp.predShoat.graze, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predShoat.graze <- apply(spp.predShoat.graze, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predShoat.graze <- cri.spp.predShoat.graze[1,,] # just spliting array into DF
+upper.spp.predShoat.graze <- cri.spp.predShoat.graze[2,,] # ditto
+full.spp.predShoat.graze <- as.data.frame(cbind(spp.predShoat.graze.mean, lower.spp.predShoat.graze, upper.spp.predShoat.graze))
+head(full.spp.predShoat.graze)
+names(full.spp.predShoat.graze) <- c("Buffalo", "Eland", "Grant's gazelle", "Thomson's gazelle","Coke's hartebeest", "Hippopotamus", "Reedbuck", "Topi", "Waterbuck", "Warthog", "Wildebeest", "Zebra",
+                                      "LCI_Buffalo", "LCI_Eland", "LCI_Grant's gazelle", "LCI_Thomson's gazelle","LCI_Coke's hartebeest", "LCI_Hippopotamus", "LCI_Reedbuck", "LCI_Topi", "LCI_Waterbuck", "LCI_Warthog", "LCI_Wildebeest", "LCI_Zebra",
+                                      "UCI_Buffalo", "UCI_Eland", "UCI_Grant's gazelle", "UCI_Thomson's gazelle","UCI_Coke's hartebeest", "UCI_Hippopotamus", "UCI_Reedbuck", "UCI_Topi", "UCI_Waterbuck", "UCI_Warthog",  "UCI_Wildebeest","UCI_Zebra")
+
+
+str(full.spp.predShoat.graze)
+
+library(reshape2)
+tmp_graze <- melt(full.spp.predShoat.graze) # will stack all columns and create a new col with variable name
+tail(tmp_graze,101)  #checking
+tmp_graze[995:1005,]#checking
+mean <- tmp_graze[1:1200 ,]
+LCI <- tmp_graze[1201:2400,]
+UCI <- tmp_graze[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.Shoat.graze.pred <- cbind(mean,LCI,UCI)
+head(new.spp.Shoat.graze.pred)
+names(new.spp.Shoat.graze.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.Shoatgraze <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.Shoatgraze <- rbind(real.Shoatgraze, real.Shoatgraze, real.Shoatgraze,
+                          real.Shoatgraze, real.Shoatgraze, real.Shoatgraze,
+                          real.Shoatgraze, real.Shoatgraze, real.Shoatgraze,
+                          real.Shoatgraze,  real.Shoatgraze,real.Shoatgraze
+) # stacking it 12 times, once per coeff predicted
+names(real.Shoatgraze) <- "Shoatgraze"
+new.spp.Shoat.graze.pred$Shoat <- unlist(real.Shoatgraze)
+head(new.spp.Shoat.graze.pred)
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+grazeShoatplot<-ggplot(new.spp.Shoat.graze.pred, aes(x=Shoat, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Shoat trap rate")
+
+
+####BROWSERS- Shoat####
+
+# predicting spp responses
+spp.predShoat.browse<- array(NA,dim=c(100, nsamp, 6)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predShoat.browse)
+for(i in 1:nsamp){
+  spp.predShoat.browse[,i,1] <- plogis(tmp$alpha0[i,5] + tmp$alphaShoat[i,5] * pred.Shoat) # bushbuck
+  spp.predShoat.browse[,i,2] <- plogis(tmp$alpha0[i,10] + tmp$alphaShoat[i,10] * pred.Shoat) #dikdik
+  spp.predShoat.browse[,i,3] <- plogis(tmp$alpha0[i,12] + tmp$alphaShoat[i,12] * pred.Shoat) #elephant
+  spp.predShoat.browse[,i,4] <- plogis(tmp$alpha0[i,17] + tmp$alphaShoat[i,17] * pred.Shoat) #giraffe
+  spp.predShoat.browse[,i,5] <- plogis(tmp$alpha0[i,24] + tmp$alphaShoat[i,24] * pred.Shoat) #impala
+  spp.predShoat.browse[,i,6] <- plogis(tmp$alpha0[i,31] + tmp$alphaShoat[i,31] * pred.Shoat) #oribi
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predShoat.browse.mean <- apply(spp.predShoat.browse, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predShoat.browse <- apply(spp.predShoat.browse, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predShoat.browse <- cri.spp.predShoat.browse[1,,] # just spliting array into DF
+upper.spp.predShoat.browse <- cri.spp.predShoat.browse[2,,] # ditto
+full.spp.predShoat.browse <- as.data.frame(cbind(spp.predShoat.browse.mean, lower.spp.predShoat.browse, upper.spp.predShoat.browse))
+head(full.spp.predShoat.browse)
+names(full.spp.predShoat.browse) <- c("Bushbuck", "Dikdik", "Elephant", "Giraffe", "Impala", "Oribi", "LCI_Bushbuck", "LCI_Dikdik", "LCI_Elephant", "LCI_Giraffe", "LCI_Impala", "LCI_Oribi", "UCI_Bushbuck", "UCI_Dikdik", "UCI_Elephant", "UCI_Giraffe", "UCI_Impala", "UCI_Oribi")
+
+
+str(full.spp.predShoat.browse)
+
+library(reshape2)
+tmp_browse <- melt(full.spp.predShoat.browse) # will stack all columns and create a new col with variable name
+tail(tmp_browse,101)  #checking
+tmp_browse[995:1005,]#checking
+mean <- tmp_browse[1:600 ,]
+LCI <- tmp_browse[601:1200,]
+UCI <- tmp_browse[1201:1800,]
+tail(UCI)
+head(mean)
+
+new.spp.Shoat.browse.pred <- cbind(mean,LCI,UCI)
+head(new.spp.Shoat.browse.pred)
+names(new.spp.Shoat.browse.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.Shoatbrowse <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.Shoatbrowse <- rbind(real.Shoatbrowse, real.Shoatbrowse, real.Shoatbrowse,
+                           real.Shoatbrowse, real.Shoatbrowse, real.Shoatbrowse
+) # stacking it 11 times, once per coeff predicted
+names(real.Shoatbrowse) <- "Shoatbrowse"
+new.spp.Shoat.browse.pred$Shoat <- unlist(real.Shoatbrowse)
+head(new.spp.Shoat.browse.pred)
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+browseShoatplot<-ggplot(new.spp.Shoat.browse.pred, aes(x=Shoat, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Shoat trap rate")
+
+
+####OMNIVORESS- Shoat####
+
+# predicting spp responses
+spp.predShoat.omni<- array(NA,dim=c(100, nsamp, 12)) #3rd dimension is for the spp coeffs, only spp with 5+ recs in agiven mgmnt
+str(spp.predShoat.omni)
+for(i in 1:nsamp){
+  spp.predShoat.omni[,i,1] <- plogis(tmp$alpha0[i,1] + tmp$alphaShoat[i,1] * pred.Shoat) # aardvark
+  spp.predShoat.omni[,i,2] <- plogis(tmp$alpha0[i,3] + tmp$alphaShoat[i,3] * pred.Shoat) #baboon
+  spp.predShoat.omni[,i,3] <- plogis(tmp$alpha0[i,6] + tmp$alphaShoat[i,6] * pred.Shoat) #bushbaby
+  spp.predShoat.omni[,i,4] <- plogis(tmp$alpha0[i,16] + tmp$alphaShoat[i,16] * pred.Shoat) #gerbil
+  spp.predShoat.omni[,i,5] <- plogis(tmp$alpha0[i,18] + tmp$alphaShoat[i,18] * pred.Shoat) #hare
+  spp.predShoat.omni[,i,6] <- plogis(tmp$alpha0[i,21] + tmp$alphaShoat[i,21] * pred.Shoat) #honey badger
+  spp.predShoat.omni[,i,7] <- plogis(tmp$alpha0[i,28] + tmp$alphaShoat[i,28] * pred.Shoat) #banded
+  spp.predShoat.omni[,i,8] <- plogis(tmp$alpha0[i,29] + tmp$alphaShoat[i,29] * pred.Shoat) #other
+  spp.predShoat.omni[,i,9] <- plogis(tmp$alpha0[i,30] + tmp$alphaShoat[i,30] * pred.Shoat) #white tailed
+  spp.predShoat.omni[,i,10] <- plogis(tmp$alpha0[i,32] + tmp$alphaShoat[i,32] * pred.Shoat) #porcupine
+  spp.predShoat.omni[,i,11] <- plogis(tmp$alpha0[i,35] + tmp$alphaShoat[i,35] * pred.Shoat) #springhare
+  spp.predShoat.omni[,i,12] <- plogis(tmp$alpha0[i,37] + tmp$alphaShoat[i,37] * pred.Shoat) #vervet
+}
+
+
+#dimnames(spp.predmanagAgric.threat.5plus)[[3]] <- c("BZ_barking deer", "BZ_chital", "BZ_jungleCat", "BZ_Nilgai",
+#                                              "BZ_sambar", "BZ_wild boar",
+#                                              "NP_chital", "OBZ_chital", "OBZ_hare", "OBZ_hogDeer", "OBZ_macaque", 
+#                                              "OBZ_nilgai","OBZ_wild boar")
+#
+spp.predShoat.omni.mean <- apply(spp.predShoat.omni, c(1,3), mean)  # getting the posterior mean of the predicted value 
+
+# getting 95% credible interval of predictions
+cri.spp.predShoat.omni <- apply(spp.predShoat.omni, c(1,3), function (x) quantile (x, probs = c(0.025, 0.975)))
+lower.spp.predShoat.omni <- cri.spp.predShoat.omni[1,,] # just spliting array into DF
+upper.spp.predShoat.omni <- cri.spp.predShoat.omni[2,,] # ditto
+full.spp.predShoat.omni <- as.data.frame(cbind(spp.predShoat.omni.mean, lower.spp.predShoat.omni, upper.spp.predShoat.omni))
+head(full.spp.predShoat.omni)
+names(full.spp.predShoat.omni) <- c("Aardvark", "Baboon", "Bushbaby", "Gerbil", "Hare", "Honey badger", "Banded mongoose", "Other mongoose", "White-tailed mongoose", "Porcupine", "Springhare", "Vervet monkey",
+                                     "LCI_Aardvark", "LCI_Baboon", "LCI_Bushbaby", "LCI_Gerbil", "LCI_Hare", "LCI_Honey badger", "LCI_Banded mongoose", "LCI_Other mongoose", "LCI_White-tailed mongoose", "LCI_Porcupine", "LCI_Springhare", "LCI_Vervet monkey", 
+                                     "UCI_Aardvark", "UCI_Baboon", "UCI_Bushbaby", "UCI_Gerbil", "UCI_Hare", "UCI_Honey badger", "UCI_Banded mongoose", "UCI_Other mongoose", "UCI_White-tailed mongoose", "UCI_Porcupine", "UCI_Springhare", "UCI_Vervet monkey")
+str(full.spp.predShoat.omni)
+
+library(reshape2)
+tmp_omni <- melt(full.spp.predShoat.omni) # will stack all columns and create a new col with variable name
+tail(tmp_omni,101)  #checking
+tmp_omni[995:1005,]#checking
+mean <- tmp_omni[1:1200 ,]
+LCI <- tmp_omni[1201:2400,]
+UCI <- tmp_omni[2401:3600,]
+tail(UCI)
+head(mean)
+
+new.spp.Shoat.omni.pred <- cbind(mean,LCI,UCI)
+head(new.spp.Shoat.omni.pred)
+names(new.spp.Shoat.omni.pred) <- c("Species","Mean","LCI_Var","LCI", "UCI_Var","UCI")
+
+library(dplyr)
+library(tidyr)
+
+# adding cols with real value for variables; will be used in x-axis of graphs
+#range propAgric (%): 0-100
+real.Shoatomni <- as.data.frame(seq(from = 0, to = 100,length.out=100)) 
+real.Shoatomni <- rbind(real.Shoatomni, real.Shoatomni, real.Shoatomni,
+                         real.Shoatomni, real.Shoatomni, real.Shoatomni, real.Shoatomni, real.Shoatomni, real.Shoatomni,
+                         real.Shoatomni, real.Shoatomni, real.Shoatomni)
+# stacking it 11 times, once per coeff predicted
+names(real.Shoatomni) <- "Shoatomni"
+new.spp.Shoat.omni.pred$Shoat <- unlist(real.Shoatomni)
+head(new.spp.Shoat.omni.pred)
+#### plotting spp response
+
+##changing DF to eliminate unfeasible values of Agric in the park
+#new.spp.threat.5plus.pred2 <- new.spp.threat.5plus.pred
+#new.spp.threat.5plus.pred2[new.spp.threat.5plus.pred2$management=="NP" & new.spp.threat.5plus.pred2$propAgric >45 , c(3:5)] <- NA
+##anything that has more than 45% agric inside NP was transformed in NA
+
+library(ggplot2)
+omniShoatplot<-ggplot(new.spp.Shoat.omni.pred, aes(x=Shoat, y=Mean))+
+  theme_bw()+ # white background (as opposed to the default grey)
+  #geom_ribbon(aes(ymin=LCI, ymax=UCI, colour=Species),alpha=0.2)+
+  geom_line(aes(colour=Species), size=1) + 
+  #theme(legend.position=c(.8,.10))+
+  theme(legend.title=element_blank())+
+  theme(legend.text = element_text(size = 12))+
+  theme(strip.text = element_text(size=11,lineheight=5.0),
+        strip.background = element_rect(fill="gray90", colour="black"))+
+  theme(axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12),
+        axis.text.x  = element_text(size=10),
+        axis.text.y  = element_text(size=10)) + 
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)))+
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)))+
+  #scale_fill_manual(values=c("yellow4", "forestgreen", "tomato3"))+
+  #theme(legend.position="none")+
+  ylab("Probability of occupancy")+
+  xlab("Shoat trap rate")
+
+layout_matrix_1 <- matrix(1:12, ncol = 4)                  # Define position matrix
+layout_matrix_1
+layout(layout_matrix_1)  
+layout(matrix(c(1, 4, 7,10,
+                2, 5, 8,11,
+                3, 6, 9, 2), nrow=3, byrow=TRUE))
+layout.show(n=12)
+
+cnhumplotfix<-cnhumplot+coord_fixed(ratio = 100)+      ylim(0, 1)                        # One plot for each layout position
+cattlecnplotfix<-cattlecnplot+coord_fixed(ratio = 100)   +      ylim(0, 1)   
+Shoatcnplotfix<-Shoatcnplot+coord_fixed(ratio = 100)   +      ylim(0, 1)   
+grazehumplotfix<-grazehumplot+coord_fixed(ratio = 100)   +      ylim(0, 1)   
+grazeCattleplotfix<-grazeCattleplot+coord_fixed(ratio = 100)   +      ylim(0, 1)   
+grazeShoatplotfix <- grazeShoatplot  +coord_fixed(ratio = 100)   +      ylim(0, 1)                        # One plot for each layout position
+browsehumplotfix<-browsehumplot+coord_fixed(ratio = 100)   +      ylim(0, 1)   
+browseCattleplotfix<-browseCattleplot+coord_fixed(ratio = 100)  +      ylim(0, 1)    
+browseShoatplotfix<-browseShoatplot+coord_fixed(ratio = 100)  +      ylim(0, 1)    
+omnihumplotfix<-omnihumplot+coord_fixed(ratio = 100)   +      ylim(0, 1)   
+omniCattleplotfix<-omniCattleplot+coord_fixed(ratio = 100) +      ylim(0, 1)     
+omniShoatplotfix<-omniShoatplot+coord_fixed(ratio = 100)  +      ylim(0, 1)    
+ 
+
+allcarn<-ggarrange(cnhumplotfix+rremove("ylab")+rremove("xlab"), cattlecnplotfix+rremove("ylab")+rremove("xlab"), Shoatcnplotfix+rremove("ylab")+rremove("xlab"),
+          ncol = 3, nrow =1, common.legend = TRUE, legend="right")
+allgraze<-ggarrange(grazehumplotfix+rremove("ylab")+rremove("xlab"), grazeCattleplotfix+rremove("ylab")+rremove("xlab"), grazeShoatplotfix+rremove("ylab")+rremove("xlab"),
+          ncol = 3, nrow =1, common.legend = TRUE, legend="right")
+allbrowse<-ggarrange(browsehumplotfix+rremove("ylab")+rremove("xlab"), browseCattleplotfix+rremove("ylab")+rremove("xlab"), browseShoatplotfix+rremove("ylab")+rremove("xlab"),
+         ncol = 3, nrow =1, common.legend = TRUE, legend="right")
+allomni<-ggarrange(omnihumplotfix+rremove("ylab"), omniCattleplotfix+rremove("ylab"), omniShoatplotfix+rremove("ylab"),
+           ncol = 3, nrow =1, common.legend = TRUE, legend="right")
+
+plot_grid(allcarn, allgraze, allbrowse, allomni, nrow=4,  align = "v", labels = c('Carnivores', 'Grazers', "Browsers", "Omnivores"), label_size = 12)
