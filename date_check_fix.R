@@ -1,5 +1,7 @@
 #Load data and packages
+
 meta_v2<-read.csv("Kenya_CT2018_metadata_withdims.csv")
+
 library(dplyr)
 library(tidyverse)
 library(lubridate)
@@ -19,7 +21,8 @@ library(lubridate)
       #meta_servicing_time<-meta_v2[grepl("000001|020001", meta_v2$ImageID),]
       #meta_servicing_time_check<-meta_servicing_time %>%   filter(time_hour< 10|time_hour>18)
 
-#Recorded correction notes in excel (camera date fix)
+#Record correction notes in excel (camera date fix)
+
 meta_v2$datecheck<-"notassigned" #set everything to not checked
 meta_v2$DateTime_corrected<-meta_v2$DateTime #add column for corrected date
 
@@ -86,12 +89,12 @@ meta_v2$DateTime_corrected<-meta_v2$DateTime #add column for corrected date
 
 ####################################################################
 #Correcting 'minus 12 hours subset"  
-minus12<-subset(meta_v2, datecheck == "minus_12_hours")
+minus12<-subset(meta_v2, datecheck == "minus_12_hours") #83843
 minus12$DateTime_corrected<- as_datetime(minus12$DateTime_corrected)    
 minus12$DateTime_corrected<-minus12$DateTime_corrected - hours(12)    
     
 #Correcting 'plus 12 hours subset"  
-plus12<-subset(meta_v2, datecheck == "plus_12_hours")
+plus12<-subset(meta_v2, datecheck == "plus_12_hours") #23857 (6059 NB14 added)
 plus12$DateTime_corrected<- as_datetime(plus12$DateTime_corrected)    
 plus12$DateTime_corrected<-plus12$DateTime_corrected + hours(12)  
 
@@ -103,11 +106,48 @@ minus_month$DateTime_corrected<-minus_month$DateTime_corrected - days(31)   #use
 #######################################################
 #meta_v1<-read.csv("Kenya_CT2018_metadata.csv")- check compared to original
 
-corrected_rows<-rbind(minus12, plus12, minus_month) #2549+83843+17798=104190 #correct:104190 obs
-removed_corrected_meta2<- anti_join(meta_v2, corrected_rows,by = "ImageID") #2357374-104190=2253184 #correct : 2253184 obs
+corrected_rows<-rbind(minus12, plus12, minus_month) #2549+83843+23857=110249 #correct:110249 obs
+removed_corrected_meta2<- anti_join(meta_v2, corrected_rows,by = "ImageID") #2357374-110249=2247125#correct : 2247125 obs
 N.img.removed_corrected_meta2<- length(unique(removed_corrected_meta2$ImageID)) 
 N.img.corrected_rows<- length(unique(corrected_rows$ImageID)) 
-removed_corrected_meta2$DateTime_corrected<- as_datetime(removed_corrected_meta2$DateTime_corrected)    
+removed_corrected_meta2$DateTime_corrected<- as_datetime(removed_corrected_meta2$DateTime_corrected)    #15283 failed to parse #ok as these are to be removed
 meta_v2_corrected<- bind_rows(removed_corrected_meta2,corrected_rows) #2357374 obs - correct
-write.csv(correctedmeta2dates, "Kenya_CT2018_metadata_withdims_v2.csv")
+
+# get time from datetime using format
+meta_v2_corrected$Time_corrected<-format(meta_v2_corrected$DateTime_corrected, format = "%H:%M:%S")
+meta_v2_corrected$Hour_corrected<-format(meta_v2_corrected$DateTime_corrected, format = "%H")
+# get date from datetime using format
+meta_v2_corrected$Date_corrected<-format(meta_v2_corrected$DateTime_corrected, format = "%Y-%m-%d")
+
+#Checking
+meta2_newcheck<- meta_v2_corrected[complete.cases(meta_v2_corrected$DateTime_corrected),] #15283 to remove #2357374-15283=  2342091 #2342091 obs: correct
+
+#Check maintenance times in metadata
+
+newcheck_servicing_time<-meta2_newcheck[grepl("000001|020001", meta2_newcheck$ImageID),]
+newcheck_time_check<-newcheck_servicing_time %>%   filter(Hour_corrected< 10|time_hour>18) #only one left is 2018_MT36_020001.JPG : this is okay, maintenance images missing but rest of times seem ok
+
+#Check total range of survey
+
+meta2_newcheck_range <-as.data.frame( meta2_newcheck%>%
+                                group_by(CT_site) %>%
+                                summarize(DateTime_corrected = range(DateTime_corrected)))
+meta2_newcheck_range<-as.data.frame(meta2_newcheck_range %>%
+                               mutate(variable = rep(c("Start", "End"), nrow(meta2_newcheck_range) / 2),
+                                     key = rep(1:(nrow(meta2_newcheck_range) / 2), each = 2)) %>%
+                              pivot_wider(id_cols = CT_site, names_from = variable, values_from = DateTime_corrected))
+
+
+###All ranges seem ok
+write.csv(meta_v2_corrected, "Kenya_CT2018_metadata_withdims_v2.csv")
+
+
+#head(removedcorrectedmeta2)
+#head(correcteddates)
+#removedcorrectedmeta2$Date<-as.Date(removedcorrectedmeta2$Date)
+#removedcorrectedmeta2$DateTime<-as.POSIXct(removedcorrectedmeta2$DateTime, format="%Y-%m-%d %H:%M:%S")
+#setdiff(correctedmeta2dates, meta2)
+#correctedmeta2dates$Date<-as.character(correctedmeta2dates$Date)
+#correctedmeta2dates$DateTime<-as.character(correctedmeta2dates$DateTime, format="%Y-%m-%d %H:%M:%S")
+
 
