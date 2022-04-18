@@ -28,45 +28,56 @@ meta_v2$DateTime_corrected<-meta_v2$DateTime #add column for corrected date
 
 ###Correcting dates/times
 ###Identifying and adding error decription first
+###allcams= survey effort matrix check
 
     #NB02- DONE
+    #allcams-fine
     meta_v2<-meta_v2%>%
     mutate(datecheck = ifelse(grepl("NB02", CT_site), "remove_cannot_correct", meta_v2$datecheck)) #NB02 cannot be corrected
         meta_v2<-meta_v2%>%
     mutate(DateTime_corrected = ifelse(grepl("NB02", CT_site), "remove", meta_v2$DateTime_corrected)) #NB02 cannot be corrected
     
     #NB07- first round set to November not October (first round 2018_NB07_020001.JPG to 2018_NB07_022549.JPG)- DONE
+    #added 1s to NB07 from 11/10/2018 to 10/11/2018 to account for change of first month
+    #allcams- camera set up on 10/10/2018- not included since not 24hr period
     which(meta_v2$ImageID == '2018_NB07_020001.JPG') #1388859
     which(meta_v2$ImageID == '2018_NB07_022549.JPG') #1391407
     meta_v2[1388859:1391407, 21]= "minus_1_month"
        
     #NB14- second round needs to go forward 12 hours (second round 2018_NB07_020001.JPG to 2018_NB14_026059.JPG)-DONE
+    #allcams-fine
     which(meta_v2$ImageID == '2018_NB14_020001.JPG') #1513833 #locating second round
     which(meta_v2$ImageID == '2018_NB14_026059.JPG') #1519891
     meta_v2[1513833:1519891, 21]= "plus_12_hours"
     
     #NB41- needs to go back 12 hours -DONE
+    #allcams-fine
     meta_v2<-meta_v2%>%
     mutate(datecheck = ifelse(grepl("NB41", CT_site), "minus_12_hours", meta_v2$datecheck))
     
     #MT01- needs to go back 12 hours- both rounds-DONE
+    #allcams fine
     meta_v2<-meta_v2%>%
     mutate(datecheck = ifelse(grepl("MT01", CT_site), "minus_12_hours", meta_v2$datecheck)) 
     
     #MT16- needs to go forward 12 hours- both rounds-DONE
+    #allcams fine
     meta_v2<-meta_v2%>%
     mutate(datecheck = ifelse(grepl("MT16", CT_site), "plus_12_hours", meta_v2$datecheck)) 
     
     #MT44- needs to go back 12 hours- both rounds-DONE
+    #allcams - since time has gone back, changed final date on allcams matrix to 23rd instead of 24th. Camera collected on 24th
     meta_v2<-meta_v2%>%
     mutate(datecheck = ifelse(grepl("MT44", CT_site), "minus_12_hours", meta_v2$datecheck)) 
     
     #OMC28- NEEDS TO GO BACK 12 HOURS- both rounds-DONE
+    #allcams - since time has gone back, changed final date on allcams matrix to 19th instead of 20th. Camera collected on 20th
     meta_v2<-meta_v2%>%
-    mutate(datecheck = ifelse(grepl("OMC28", CT_site), "minus_12_hours", meta_v2$datecheck)) #NB02 cannot be corrected
+    mutate(datecheck = ifelse(grepl("OMC28", CT_site), "minus_12_hours", meta_v2$datecheck)) 
              
     
     #OMC33: first round need to go back 12 hours-DONE
+    #allcams-fine
     which(meta_v2$ImageID == '2018_OMC33_000001.JPG') #2281315 #locating first round
     which(meta_v2$ImageID == '2018_OMC33_018043.JPG') #2299356
     meta_v2[2281315:2299356, 21]= "minus_12_hours"
@@ -77,10 +88,12 @@ meta_v2$DateTime_corrected<-meta_v2$DateTime #add column for corrected date
     meta_v2[2299357:2299361, 22]= "remove"
     
     #OMC37: -DONE
+    #allcams-fine
     meta_v2<-meta_v2%>%
       mutate(datecheck = ifelse(grepl("OMC37", CT_site), "minus_12_hours", meta_v2$datecheck)) #NB02 cannot be corrected
     
     #MN10: a number of 2017 images nees removing- DONE
+    #allcams fine
     meta_v2$yearcheck<-format(as.Date(meta_v2$Date, format="%Y-%m-%d"),"%Y")
     meta_v2$datecheck <- ifelse(grepl("MN10", meta_v2$CT_site) & grepl("2017", meta_v2$yearcheck),
                    "remove_wrong_year",meta_v2$datecheck)
@@ -149,5 +162,4 @@ write.csv(meta_v2_corrected, "Kenya_CT2018_metadata_withdims_v2.csv")
 #setdiff(correctedmeta2dates, meta2)
 #correctedmeta2dates$Date<-as.character(correctedmeta2dates$Date)
 #correctedmeta2dates$DateTime<-as.character(correctedmeta2dates$DateTime, format="%Y-%m-%d %H:%M:%S")
-
 
