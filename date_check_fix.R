@@ -8,18 +8,18 @@ library(lubridate)
 
 #Check total range of survey
 
-      #meta_v2_range <-as.data.frame( meta_v2 %>%
-      #                                 group_by(CT_site) %>%
-      #                                 summarize(DateTime = range(DateTime)))
-      #meta_v2_range<-as.data.frame(meta_v2_range %>%
-      #                               mutate(variable = rep(c("Start", "End"), nrow(meta_v2_range) / 2),
-      #                                      key = rep(1:(nrow(meta_v2_range) / 2), each = 2)) %>%
-      #                               pivot_wider(id_cols = CT_site, names_from = variable, values_from = DateTime))
+      meta_v2_range <-as.data.frame( meta_v2 %>%
+                                       group_by(CT_site) %>%
+                                       summarize(DateTime = range(DateTime)))
+      meta_v2_range<-as.data.frame(meta_v2_range %>%
+                                     mutate(variable = rep(c("Start", "End"), nrow(meta_v2_range) / 2),
+                                            key = rep(1:(nrow(meta_v2_range) / 2), each = 2)) %>%
+                                     pivot_wider(id_cols = CT_site, names_from = variable, values_from = DateTime))
 
 #Check maintenance times in metadata
 
-      #meta_servicing_time<-meta_v2[grepl("000001|020001", meta_v2$ImageID),]
-      #meta_servicing_time_check<-meta_servicing_time %>%   filter(time_hour< 10|time_hour>18)
+      meta_servicing_time<-meta_v2[grepl("000001|020001", meta_v2$ImageID),]
+      meta_servicing_time_check<-meta_servicing_time %>%   filter(time_hour< 10|time_hour>18)
 
 #Record correction notes in excel (camera date fix)
 
